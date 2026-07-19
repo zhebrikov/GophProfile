@@ -17,11 +17,11 @@
 
 | Компонент | Технология |
 |-----------|------------|
-| Язык | Go 1.21+ |
+| Язык | Go 1.25+ |
 | HTTP | Echo / Chi |
 | БД | PostgreSQL |
 | Файлы | MinIO (S3) |
-| Очереди | RabbitMQ или Kafka |
+| Очереди | RabbitMQ (topic exchange) |
 | Контейнеры | Docker, Docker Compose |
 
 ## Архитектура
@@ -235,7 +235,7 @@ type AvatarDeleteEvent struct {
 
 ### Требования
 
-- Go 1.21+
+- Go 1.25+
 - Docker и Docker Compose
 
 ### Запуск окружения
@@ -263,10 +263,11 @@ go run ./cmd/worker
 ### Тесты
 
 ```bash
-go test ./...
+make test
+make cover   # цель: >50% на internal/ и pkg/
 ```
 
-Цель покрытия unit-тестами — **>50%**. Рекомендуемые инструменты: `testify`, `testcontainers-go`, `golangci-lint`.
+Цель покрытия unit-тестами — **>50%**. Рекомендуемые инструменты: `testify`, `golangci-lint`.
 
 ## Конфигурация
 
