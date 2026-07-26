@@ -3,11 +3,9 @@ package middleware
 import (
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/labstack/echo/v4"
 	"github.com/practicum/gophprofile/internal/domain"
-	"golang.org/x/time/rate"
 )
 
 func RequireUserID(next echo.HandlerFunc) echo.HandlerFunc {
@@ -30,36 +28,31 @@ func RequireUserID(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
+// RateLimiter rejects requests that exceed the configured per-key rate.
 type RateLimiter struct {
-	mu       sync.Mutex
-	limiters map[string]*rate.Limiter
-	r        rate.Limit
-	b        int
+	store LimiterStore
 }
 
+// NewRateLimiter creates a rate limiter with an in-memory TTL store.
+// Inactive keys are evicted after defaultLimiterTTL.
 func NewRateLimiter(rps float64, burst int) *RateLimiter {
-	return &RateLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		r:        rate.Limit(rps),
-		b:        burst,
-	}
+	return NewRateLimiterWithStore(NewMemoryLimiterStore(
+		rps,
+		burst,
+		defaultLimiterTTL,
+		defaultLimiterCleanupInterval,
+	))
 }
 
-func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	lim, ok := rl.limiters[key]
-	if !ok {
-		lim = rate.NewLimiter(rl.r, rl.b)
-		rl.limiters[key] = lim
-	}
-	return lim
+// NewRateLimiterWithStore creates a rate limiter backed by the given store.
+// Use this to swap the in-memory implementation for Redis or another backend.
+func NewRateLimiterWithStore(store LimiterStore) *RateLimiter {
+	return &RateLimiter{store: store}
 }
 
 func (rl *RateLimiter) Middleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		key := c.RealIP()
-		if !rl.getLimiter(key).Allow() {
+		if !rl.store.Allow(c.RealIP()) {
 			return c.JSON(http.StatusTooManyRequests, domain.ErrorResponse{
 				Error: "Rate limit exceeded",
 			})

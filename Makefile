@@ -1,4 +1,4 @@
-.PHONY: run server worker test cover lint docker-up docker-down deps
+.PHONY: run server worker migrate test cover lint docker-up docker-down deps
 
 deps:
 	go mod tidy
@@ -8,6 +8,9 @@ server:
 
 worker:
 	go run ./cmd/worker
+
+migrate:
+	go run ./cmd/migrate -command up
 
 test:
 	go test ./... -count=1

@@ -18,6 +18,13 @@ func TestLoadDefaults(t *testing.T) {
 	require.Equal(t, "avatars.exchange", cfg.RabbitMQ.Exchange)
 }
 
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	cfg, err := config.Load()
+	require.Nil(t, cfg)
+	require.ErrorContains(t, err, "DATABASE_URL is required")
+}
+
 func TestLoadOverrides(t *testing.T) {
 	t.Setenv("HTTP_ADDR", ":9090")
 	t.Setenv("DATABASE_URL", "postgres://test")
@@ -34,4 +41,28 @@ func TestLoadOverrides(t *testing.T) {
 	require.True(t, cfg.S3.UseSSL)
 	require.Equal(t, 5.0, cfg.RateLimit)
 	require.Positive(t, cfg.ShutdownTimeout())
+}
+
+func TestLoadInvalidBool(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test")
+	t.Setenv("S3_USE_SSL", "yes")
+	cfg, err := config.Load()
+	require.Nil(t, cfg)
+	require.ErrorContains(t, err, "invalid S3_USE_SSL")
+}
+
+func TestLoadInvalidInt64(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test")
+	t.Setenv("MAX_FILE_SIZE", "10mb")
+	cfg, err := config.Load()
+	require.Nil(t, cfg)
+	require.ErrorContains(t, err, "invalid MAX_FILE_SIZE")
+}
+
+func TestLoadInvalidFloat(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://test")
+	t.Setenv("RATE_LIMIT", "fast")
+	cfg, err := config.Load()
+	require.Nil(t, cfg)
+	require.ErrorContains(t, err, "invalid RATE_LIMIT")
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,8 +13,7 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("avatar not found")
-	ErrForbidden = errors.New("forbidden")
+	ErrNotFound = errors.New("avatar not found")
 )
 
 type AvatarRepository struct {
@@ -118,37 +116,17 @@ func (r *AvatarRepository) ListByUserID(ctx context.Context, userID string) ([]*
 	return result, rows.Err()
 }
 
-func (r *AvatarRepository) SoftDelete(ctx context.Context, id, userID string) (*domain.Avatar, error) {
-	avatar, err := r.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if avatar.UserID != userID {
-		return nil, ErrForbidden
-	}
-
+func (r *AvatarRepository) SoftDelete(ctx context.Context, id string) error {
 	now := time.Now().UTC()
 	const q = `UPDATE avatars SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
 	tag, err := r.pool.Exec(ctx, q, now, id)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, ErrNotFound
+		return ErrNotFound
 	}
-	avatar.DeletedAt = &now
-	return avatar, nil
-}
-
-func (r *AvatarRepository) SoftDeleteLatestByUser(ctx context.Context, userID, requesterID string) (*domain.Avatar, error) {
-	if userID != requesterID {
-		return nil, ErrForbidden
-	}
-	avatar, err := r.GetLatestByUserID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return r.SoftDelete(ctx, avatar.ID, requesterID)
+	return nil
 }
 
 func (r *AvatarRepository) UpdateUploadStatus(ctx context.Context, id, status string) error {
@@ -221,12 +199,4 @@ func scanAvatar(row scannable) (*domain.Avatar, error) {
 		a.ThumbnailS3Keys = thumbs
 	}
 	return &a, nil
-}
-
-func Migrate(ctx context.Context, pool *pgxpool.Pool, sql string) error {
-	_, err := pool.Exec(ctx, sql)
-	if err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	return nil
 }

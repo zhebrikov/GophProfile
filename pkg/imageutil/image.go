@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/KarpelesLab/gowebp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 )
@@ -86,18 +87,28 @@ func EncodePNG(img image.Image) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func EncodeWebP(img image.Image, quality float32) ([]byte, error) {
+	var buf bytes.Buffer
+	opts := &gowebp.Options{Lossy: true, Quality: quality, Method: 4}
+	if err := gowebp.Encode(&buf, img, opts); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func Encode(img image.Image, format string) ([]byte, string, error) {
 	switch strings.ToLower(format) {
 	case "png", "image/png":
 		data, err := EncodePNG(img)
 		return data, "image/png", err
 	case "webp", "image/webp":
-		// WebP encode is not in stdlib; fall back to JPEG for output conversion.
+		data, err := EncodeWebP(img, 85)
+		return data, "image/webp", err
+	case "jpeg", "jpg", "image/jpeg", "":
 		data, err := EncodeJPEG(img, 85)
 		return data, "image/jpeg", err
 	default:
-		data, err := EncodeJPEG(img, 85)
-		return data, "image/jpeg", err
+		return nil, "", fmt.Errorf("%w: %s", ErrUnsupportedFormat, format)
 	}
 }
 
@@ -113,7 +124,10 @@ func ReadLimited(r io.Reader, max int64) ([]byte, error) {
 	return data, nil
 }
 
-var ErrTooLarge = fmt.Errorf("file too large")
+var (
+	ErrTooLarge          = fmt.Errorf("file too large")
+	ErrUnsupportedFormat = fmt.Errorf("unsupported output format")
+)
 
 func CreateThumbnail(data []byte, size int) ([]byte, error) {
 	img, _, err := Decode(data)

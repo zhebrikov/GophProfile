@@ -1,6 +1,7 @@
+-- +goose Up
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE IF NOT EXISTS avatars (
+CREATE TABLE avatars (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id VARCHAR(255) NOT NULL,
     file_name VARCHAR(255) NOT NULL,
@@ -17,11 +18,15 @@ CREATE TABLE IF NOT EXISTS avatars (
     deleted_at TIMESTAMP WITH TIME ZONE
 );
 
-CREATE INDEX IF NOT EXISTS idx_avatars_user_id ON avatars(user_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_avatars_status ON avatars(upload_status, processing_status);
-CREATE INDEX IF NOT EXISTS idx_avatars_deleted_at ON avatars(deleted_at);
+CREATE INDEX idx_avatars_user_id ON avatars(user_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_avatars_status ON avatars(upload_status, processing_status);
+CREATE INDEX idx_avatars_deleted_at ON avatars(deleted_at);
 
-CREATE TABLE IF NOT EXISTS processed_messages (
+CREATE TABLE processed_messages (
     message_id VARCHAR(255) PRIMARY KEY,
     processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- +goose Down
+DROP TABLE IF EXISTS processed_messages;
+DROP TABLE IF EXISTS avatars;

@@ -100,6 +100,18 @@ func TestResizeAndEncode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "image/jpeg", outMIME)
 	require.NotEmpty(t, encoded)
+
+	encoded, outMIME, err = imageutil.Encode(thumb, "webp")
+	require.NoError(t, err)
+	require.Equal(t, "image/webp", outMIME)
+	require.NotEmpty(t, encoded)
+	decoded, mime, err := imageutil.Decode(encoded)
+	require.NoError(t, err)
+	require.Equal(t, "image/webp", mime)
+	require.Equal(t, 100, decoded.Bounds().Dx())
+
+	_, _, err = imageutil.Encode(thumb, "gif")
+	require.ErrorIs(t, err, imageutil.ErrUnsupportedFormat)
 }
 
 func TestCreateThumbnail(t *testing.T) {

@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"log"
 
 	"github.com/practicum/gophprofile/internal/domain"
 )
@@ -25,15 +26,18 @@ func (s *HealthService) Check(ctx context.Context) domain.HealthResponse {
 	status := "ok"
 
 	if err := s.repo.Ping(ctx); err != nil {
-		components["postgres"] = "error: " + err.Error()
+		log.Printf("health: postgres: %v", err)
+		components["postgres"] = "unavailable"
 		status = "degraded"
 	}
 	if err := s.storage.Ping(ctx); err != nil {
-		components["s3"] = "error: " + err.Error()
+		log.Printf("health: s3: %v", err)
+		components["s3"] = "unavailable"
 		status = "degraded"
 	}
 	if err := s.broker.Ping(ctx); err != nil {
-		components["broker"] = "error: " + err.Error()
+		log.Printf("health: broker: %v", err)
+		components["broker"] = "unavailable"
 		status = "degraded"
 	}
 

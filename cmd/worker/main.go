@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -33,14 +32,6 @@ func main() {
 
 	if err := waitFor(ctx, "postgres", func() error { return pool.Ping(ctx) }); err != nil {
 		log.Fatalf("postgres: %v", err)
-	}
-
-	migrationSQL, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		log.Fatalf("read migrations: %v", err)
-	}
-	if err := repository.Migrate(ctx, pool, string(migrationSQL)); err != nil {
-		log.Fatalf("migrate: %v", err)
 	}
 
 	store, err := storage.NewS3Storage(

@@ -12,8 +12,7 @@ type AvatarRepository interface {
 	GetByID(ctx context.Context, id string) (*domain.Avatar, error)
 	GetLatestByUserID(ctx context.Context, userID string) (*domain.Avatar, error)
 	ListByUserID(ctx context.Context, userID string) ([]*domain.Avatar, error)
-	SoftDelete(ctx context.Context, id, userID string) (*domain.Avatar, error)
-	SoftDeleteLatestByUser(ctx context.Context, userID, requesterID string) (*domain.Avatar, error)
+	SoftDelete(ctx context.Context, id string) error
 	UpdateUploadStatus(ctx context.Context, id, status string) error
 	Ping(ctx context.Context) error
 }

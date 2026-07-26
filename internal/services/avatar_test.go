@@ -64,28 +64,14 @@ func (r *memRepo) ListByUserID(ctx context.Context, userID string) ([]*domain.Av
 	}
 	return out, nil
 }
-func (r *memRepo) SoftDelete(_ context.Context, id, userID string) (*domain.Avatar, error) {
+func (r *memRepo) SoftDelete(_ context.Context, id string) error {
 	a, ok := r.avatars[id]
 	if !ok || a.DeletedAt != nil {
-		return nil, repository.ErrNotFound
-	}
-	if a.UserID != userID {
-		return nil, repository.ErrForbidden
+		return repository.ErrNotFound
 	}
 	now := time.Now().UTC()
 	a.DeletedAt = &now
-	cp := *a
-	return &cp, nil
-}
-func (r *memRepo) SoftDeleteLatestByUser(ctx context.Context, userID, requesterID string) (*domain.Avatar, error) {
-	if userID != requesterID {
-		return nil, repository.ErrForbidden
-	}
-	a, err := r.GetLatestByUserID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return r.SoftDelete(ctx, a.ID, requesterID)
+	return nil
 }
 func (r *memRepo) UpdateUploadStatus(_ context.Context, id, status string) error {
 	a, ok := r.avatars[id]
@@ -216,7 +202,7 @@ func TestDeleteAndPlaceholder(t *testing.T) {
 	require.NoError(t, err)
 
 	err = svc.Delete(context.Background(), resp.ID, "other")
-	require.ErrorIs(t, err, repository.ErrForbidden)
+	require.ErrorIs(t, err, services.ErrForbidden)
 
 	err = svc.Delete(context.Background(), resp.ID, "user-1")
 	require.NoError(t, err)

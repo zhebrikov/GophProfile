@@ -50,7 +50,7 @@ func (h *AvatarHandler) GetAvatar(c echo.Context) error {
 
 	data, contentType, etag, err := h.avatars.GetImage(c.Request().Context(), id, size, format)
 	if err != nil {
-		return mapNotFound(c, err)
+		return mapGetImageError(c, err)
 	}
 	return writeImage(c, data, contentType, etag)
 }
@@ -62,7 +62,7 @@ func (h *AvatarHandler) GetUserAvatar(c echo.Context) error {
 
 	data, contentType, etag, err := h.avatars.GetUserAvatar(c.Request().Context(), userID, size, format)
 	if err != nil {
-		return mapNotFound(c, err)
+		return mapGetImageError(c, err)
 	}
 	return writeImage(c, data, contentType, etag)
 }
@@ -78,7 +78,7 @@ func (h *AvatarHandler) GetMetadata(c echo.Context) error {
 func (h *AvatarHandler) ListUserAvatars(c echo.Context) error {
 	list, err := h.avatars.ListByUser(c.Request().Context(), c.Param("user_id"))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{Error: err.Error()})
+		return internalError(c, err)
 	}
 	return c.JSON(http.StatusOK, list)
 }
@@ -139,7 +139,7 @@ func mapUploadError(c echo.Context, err error, maxSize int64) error {
 			Details: "X-User-ID header is required",
 		})
 	default:
-		return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{Error: err.Error()})
+		return internalError(c, err)
 	}
 }
 
@@ -147,20 +147,40 @@ func mapNotFound(c echo.Context, err error) error {
 	if errors.Is(err, repository.ErrNotFound) {
 		return c.JSON(http.StatusNotFound, domain.ErrorResponse{Error: "Avatar not found"})
 	}
-	return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{Error: err.Error()})
+	return internalError(c, err)
+}
+
+func mapGetImageError(c echo.Context, err error) error {
+	if errors.Is(err, repository.ErrNotFound) {
+		return c.JSON(http.StatusNotFound, domain.ErrorResponse{Error: "Avatar not found"})
+	}
+	if errors.Is(err, services.ErrUnsupportedFormat) {
+		return c.JSON(http.StatusBadRequest, domain.ErrorResponse{
+			Error:   "Unsupported output format",
+			Details: "Supported formats: jpeg, png, webp",
+		})
+	}
+	return internalError(c, err)
 }
 
 func mapDeleteError(c echo.Context, err error) error {
 	if errors.Is(err, repository.ErrNotFound) {
 		return c.JSON(http.StatusNotFound, domain.ErrorResponse{Error: "Avatar not found"})
 	}
-	if errors.Is(err, repository.ErrForbidden) {
+	if errors.Is(err, services.ErrForbidden) {
 		return c.JSON(http.StatusForbidden, domain.ErrorResponse{
 			Error:   "Forbidden",
 			Details: "You can only delete your own avatars",
 		})
 	}
-	return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{Error: err.Error()})
+	return internalError(c, err)
+}
+
+func internalError(c echo.Context, err error) error {
+	c.Logger().Error(err)
+	return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{
+		Error: http.StatusText(http.StatusInternalServerError),
+	})
 }
 
 func UserIDFromContext(c echo.Context) string {

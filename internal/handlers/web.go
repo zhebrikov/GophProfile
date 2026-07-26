@@ -1,12 +1,13 @@
 package handlers
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"path/filepath"
 
 	"github.com/labstack/echo/v4"
-	"github.com/practicum/gophprofile/internal/domain"
+	"github.com/practicum/gophprofile/internal/services"
 )
 
 type WebHandler struct {
@@ -46,7 +47,7 @@ func (h *WebHandler) UploadSubmit(c echo.Context) error {
 
 	resp, err := h.avatars.Upload(c.Request().Context(), userID, file.Filename, src)
 	if err != nil {
-		return h.renderUploadError(c, err.Error())
+		return h.mapWebUploadError(c, err)
 	}
 
 	return h.tmpl.ExecuteTemplate(c.Response(), "upload.html", map[string]any{
@@ -61,13 +62,31 @@ func (h *WebHandler) Gallery(c echo.Context) error {
 	userID := c.Param("user_id")
 	list, err := h.avatars.ListByUser(c.Request().Context(), userID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{Error: err.Error()})
+		return internalError(c, err)
 	}
 	return h.tmpl.ExecuteTemplate(c.Response(), "gallery.html", map[string]any{
 		"Title":   "Gallery",
 		"UserID":  userID,
 		"Avatars": list,
 	})
+}
+
+func (h *WebHandler) mapWebUploadError(c echo.Context, err error) error {
+	switch {
+	case errors.Is(err, services.ErrFileTooLarge):
+		return h.renderUploadError(c, "File too large")
+	case errors.Is(err, services.ErrInvalidFormat):
+		return h.renderUploadError(c, "Invalid file format")
+	case errors.Is(err, services.ErrInvalidUserID):
+		return h.renderUploadError(c, "Invalid user ID")
+	default:
+		c.Logger().Error(err)
+		c.Response().WriteHeader(http.StatusInternalServerError)
+		return h.tmpl.ExecuteTemplate(c.Response(), "upload.html", map[string]any{
+			"Title": "Upload Avatar",
+			"Error": http.StatusText(http.StatusInternalServerError),
+		})
+	}
 }
 
 func (h *WebHandler) renderUploadError(c echo.Context, msg string) error {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	appmw "github.com/practicum/gophprofile/internal/middleware"
@@ -68,4 +69,16 @@ func TestRateLimiter(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	require.NoError(t, h(e.NewContext(req2, rec2)))
 	require.Equal(t, http.StatusTooManyRequests, rec2.Code)
+}
+
+func TestMemoryLimiterStore_ExpiresInactiveKeys(t *testing.T) {
+	store := appmw.NewMemoryLimiterStore(1, 1, 50*time.Millisecond, 20*time.Millisecond)
+
+	require.True(t, store.Allow("10.0.0.1"))
+	require.False(t, store.Allow("10.0.0.1"))
+
+	time.Sleep(80 * time.Millisecond)
+
+	// After TTL the key is gone, so a fresh limiter allows the next request.
+	require.True(t, store.Allow("10.0.0.1"))
 }

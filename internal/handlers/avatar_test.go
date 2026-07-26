@@ -152,6 +152,24 @@ func TestGetAvatar_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestGetAvatar_UnsupportedFormat(t *testing.T) {
+	svc := &mockAvatarService{
+		getImgFn: func(ctx context.Context, avatarID, size, format string) ([]byte, string, string, error) {
+			return nil, "", "", services.ErrUnsupportedFormat
+		},
+	}
+	h := handlers.NewAvatarHandler(svc, &mockHealth{})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/?format=gif", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("avatar_id")
+	c.SetParamValues("a1")
+
+	require.NoError(t, h.GetAvatar(c))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestGetAvatar_OK(t *testing.T) {
 	svc := &mockAvatarService{
 		getImgFn: func(ctx context.Context, avatarID, size, format string) ([]byte, string, string, error) {
@@ -175,7 +193,7 @@ func TestGetAvatar_OK(t *testing.T) {
 func TestDelete_Forbidden(t *testing.T) {
 	svc := &mockAvatarService{
 		delFn: func(ctx context.Context, avatarID, userID string) error {
-			return repository.ErrForbidden
+			return services.ErrForbidden
 		},
 	}
 	h := handlers.NewAvatarHandler(svc, &mockHealth{})

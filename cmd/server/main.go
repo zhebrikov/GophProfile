@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -39,14 +38,6 @@ func main() {
 
 	if err := waitFor(ctx, "postgres", func() error { return pool.Ping(ctx) }); err != nil {
 		log.Fatalf("postgres: %v", err)
-	}
-
-	migrationSQL, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		log.Fatalf("read migrations: %v", err)
-	}
-	if err := repository.Migrate(ctx, pool, string(migrationSQL)); err != nil {
-		log.Fatalf("migrate: %v", err)
 	}
 
 	store, err := storage.NewS3Storage(
@@ -112,17 +103,30 @@ func main() {
 		return c.Redirect(http.StatusFound, "/web/upload")
 	})
 
+	errCh := make(chan error, 1)
 	go func() {
 		log.Printf("server listening on %s", cfg.HTTPAddr)
-		if err := e.Start(cfg.HTTPAddr); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server: %v", err)
-		}
+		errCh <- e.Start(cfg.HTTPAddr)
 	}()
 
-	<-ctx.Done()
+	var serverErr error
+	select {
+	case serverErr = <-errCh:
+	case <-ctx.Done():
+	}
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout())
 	defer shutdownCancel()
-	_ = e.Shutdown(shutdownCtx)
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+
+	if serverErr == nil {
+		serverErr = <-errCh
+	}
+	if serverErr != nil && serverErr != http.ErrServerClosed {
+		log.Printf("server: %v", serverErr)
+	}
 }
 
 func waitFor(ctx context.Context, name string, fn func() error) error {

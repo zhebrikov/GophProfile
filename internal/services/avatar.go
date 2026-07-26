@@ -174,12 +174,17 @@ func (s *AvatarService) loadImage(ctx context.Context, avatar *domain.Avatar, si
 
 	if format != "" && format != "original" {
 		img, _, err := imageutil.Decode(data)
-		if err == nil {
-			encoded, mime, err := imageutil.Encode(img, format)
-			if err == nil {
-				return encoded, mime, hashETag(encoded), nil
-			}
+		if err != nil {
+			return nil, "", "", err
 		}
+		encoded, mime, err := imageutil.Encode(img, format)
+		if err != nil {
+			if errors.Is(err, imageutil.ErrUnsupportedFormat) {
+				return nil, "", "", fmt.Errorf("%w: %w", ErrUnsupportedFormat, err)
+			}
+			return nil, "", "", err
+		}
+		return encoded, mime, hashETag(encoded), nil
 	}
 
 	return data, contentType, etag, nil
@@ -233,16 +238,28 @@ func (s *AvatarService) ListByUser(ctx context.Context, userID string) ([]*domai
 }
 
 func (s *AvatarService) Delete(ctx context.Context, avatarID, userID string) error {
-	avatar, err := s.repo.SoftDelete(ctx, avatarID, userID)
+	avatar, err := s.repo.GetByID(ctx, avatarID)
 	if err != nil {
+		return err
+	}
+	if avatar.UserID != userID {
+		return ErrForbidden
+	}
+	if err := s.repo.SoftDelete(ctx, avatarID); err != nil {
 		return err
 	}
 	return s.publishDelete(ctx, avatar)
 }
 
 func (s *AvatarService) DeleteUserAvatar(ctx context.Context, userID, requesterID string) error {
-	avatar, err := s.repo.SoftDeleteLatestByUser(ctx, userID, requesterID)
+	if userID != requesterID {
+		return ErrForbidden
+	}
+	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
+		return err
+	}
+	if err := s.repo.SoftDelete(ctx, avatar.ID); err != nil {
 		return err
 	}
 	return s.publishDelete(ctx, avatar)
@@ -278,7 +295,9 @@ func hashETag(data []byte) string {
 }
 
 var (
-	ErrInvalidUserID = fmt.Errorf("invalid user id")
-	ErrInvalidFormat = fmt.Errorf("invalid file format")
-	ErrFileTooLarge  = fmt.Errorf("file too large")
+	ErrInvalidUserID     = errors.New("invalid user id")
+	ErrInvalidFormat     = errors.New("invalid file format")
+	ErrUnsupportedFormat = errors.New("unsupported output format")
+	ErrFileTooLarge      = errors.New("file too large")
+	ErrForbidden         = errors.New("forbidden")
 )

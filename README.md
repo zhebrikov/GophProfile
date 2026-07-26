@@ -63,7 +63,8 @@
 avatars-service/
 ├── cmd/
 │   ├── server/          # HTTP API и веб-интерфейс
-│   └── worker/          # Асинхронная обработка
+│   ├── worker/          # Асинхронная обработка
+│   └── migrate/         # Применение миграций (goose)
 ├── internal/
 │   ├── api/
 │   ├── config/
@@ -244,7 +245,7 @@ type AvatarDeleteEvent struct {
 docker compose up -d --build
 ```
 
-Поднимаются: **server**, **worker**, PostgreSQL, MinIO, брокер сообщений.
+Поднимаются: **migrate** (однократно), **server**, **worker**, PostgreSQL, MinIO, брокер сообщений.
 
 ### Локальная разработка
 
@@ -252,13 +253,18 @@ docker compose up -d --build
 # Зависимости инфраструктуры
 docker compose up -d postgres minio rabbitmq
 
-# Миграции
-# go run ./cmd/...  или migrate
+# Миграции (goose; отдельно от server/worker)
+go run ./cmd/migrate -command up
+# или: make migrate
 
 # Сервер и worker
 go run ./cmd/server
 go run ./cmd/worker
 ```
+
+Откат последней миграции: `go run ./cmd/migrate -command down`. Статус: `go run ./cmd/migrate -command status`.
+
+Если PostgreSQL уже поднимался со старой схемой без goose, пересоздайте том: `docker compose down -v`, затем снова `docker compose up -d --build`.
 
 ### Тесты
 
