@@ -13,9 +13,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/practicum/gophprofile/internal/domain"
+	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/pkg/broker"
 	"github.com/practicum/gophprofile/pkg/imageutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type AvatarService struct {
@@ -43,6 +47,10 @@ func NewAvatarService(
 }
 
 func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, reader io.Reader) (*domain.UploadResponse, error) {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.Upload")
+	defer span.End()
+	span.SetAttributes(attribute.String("user.id", userID))
+
 	if strings.TrimSpace(userID) == "" {
 		return nil, ErrInvalidUserID
 	}
@@ -52,6 +60,8 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 		if err == imageutil.ErrTooLarge {
 			return nil, ErrFileTooLarge
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -65,6 +75,7 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 	avatarID := uuid.New().String()
 	ext := imageutil.ExtensionForMIME(mime)
 	s3Key := fmt.Sprintf("originals/%s/%s.%s", userID, avatarID, ext)
+	span.SetAttributes(attribute.String("avatar.id", avatarID))
 
 	avatar := &domain.Avatar{
 		ID:               avatarID,
@@ -80,15 +91,21 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 	}
 
 	if err := s.repo.Create(ctx, avatar); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("create avatar record: %w", err)
 	}
 
 	if err := s.storage.Upload(ctx, s3Key, bytes.NewReader(data), int64(len(data)), mime); err != nil {
 		_ = s.repo.UpdateUploadStatus(ctx, avatarID, domain.UploadStatusFailed)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("upload to s3: %w", err)
 	}
 
 	if err := s.repo.UpdateUploadStatus(ctx, avatarID, domain.UploadStatusUploaded); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -99,8 +116,18 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 		S3Key:     s3Key,
 	}
 	if err := s.broker.Publish(ctx, broker.RoutingKeyUploaded, event); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("publish upload event: %w", err)
 	}
+
+	observability.AvatarsUploaded.Inc()
+	observability.LoggerFromContext(ctx).Info("avatar uploaded",
+		"avatar_id", avatarID,
+		"user_id", userID,
+		"size_bytes", len(data),
+		"mime", mime,
+	)
 
 	return &domain.UploadResponse{
 		ID:        avatar.ID,
@@ -112,20 +139,42 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 }
 
 func (s *AvatarService) GetImage(ctx context.Context, avatarID, size, format string) ([]byte, string, string, error) {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.GetImage")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("avatar.id", avatarID),
+		attribute.String("image.size", size),
+		attribute.String("image.format", format),
+	)
+
 	avatar, err := s.repo.GetByID(ctx, avatarID)
 	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
 		return nil, "", "", err
 	}
 	return s.loadImage(ctx, avatar, size, format)
 }
 
 func (s *AvatarService) GetUserAvatar(ctx context.Context, userID, size, format string) ([]byte, string, string, error) {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.GetUserAvatar")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("user.id", userID),
+		attribute.String("image.size", size),
+		attribute.String("image.format", format),
+	)
+
 	avatar, err := s.repo.GetLatestByUserID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			data, mime := DefaultPlaceholder()
 			return data, mime, hashETag(data), nil
 		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, "", "", err
 	}
 	return s.loadImage(ctx, avatar, size, format)
@@ -191,8 +240,16 @@ func (s *AvatarService) loadImage(ctx context.Context, avatar *domain.Avatar, si
 }
 
 func (s *AvatarService) GetMetadata(ctx context.Context, avatarID string) (*domain.MetadataResponse, error) {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.GetMetadata")
+	defer span.End()
+	span.SetAttributes(attribute.String("avatar.id", avatarID))
+
 	avatar, err := s.repo.GetByID(ctx, avatarID)
 	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
 		return nil, err
 	}
 
@@ -222,8 +279,14 @@ func (s *AvatarService) GetMetadata(ctx context.Context, avatarID string) (*doma
 }
 
 func (s *AvatarService) ListByUser(ctx context.Context, userID string) ([]*domain.MetadataResponse, error) {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.ListByUser")
+	defer span.End()
+	span.SetAttributes(attribute.String("user.id", userID))
+
 	avatars, err := s.repo.ListByUserID(ctx, userID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	result := make([]*domain.MetadataResponse, 0, len(avatars))
@@ -238,6 +301,13 @@ func (s *AvatarService) ListByUser(ctx context.Context, userID string) ([]*domai
 }
 
 func (s *AvatarService) Delete(ctx context.Context, avatarID, userID string) error {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.Delete")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("avatar.id", avatarID),
+		attribute.String("user.id", userID),
+	)
+
 	avatar, err := s.repo.GetByID(ctx, avatarID)
 	if err != nil {
 		return err
@@ -248,10 +318,18 @@ func (s *AvatarService) Delete(ctx context.Context, avatarID, userID string) err
 	if err := s.repo.SoftDelete(ctx, avatarID); err != nil {
 		return err
 	}
-	return s.publishDelete(ctx, avatar)
+	if err := s.publishDelete(ctx, avatar); err != nil {
+		return err
+	}
+	observability.AvatarsDeleted.Inc()
+	observability.LoggerFromContext(ctx).Info("avatar deleted", "avatar_id", avatarID, "user_id", userID)
+	return nil
 }
 
 func (s *AvatarService) DeleteUserAvatar(ctx context.Context, userID, requesterID string) error {
+	ctx, span := otel.Tracer("gophprofile/services").Start(ctx, "AvatarService.DeleteUserAvatar")
+	defer span.End()
+
 	if userID != requesterID {
 		return ErrForbidden
 	}
@@ -262,7 +340,12 @@ func (s *AvatarService) DeleteUserAvatar(ctx context.Context, userID, requesterI
 	if err := s.repo.SoftDelete(ctx, avatar.ID); err != nil {
 		return err
 	}
-	return s.publishDelete(ctx, avatar)
+	if err := s.publishDelete(ctx, avatar); err != nil {
+		return err
+	}
+	observability.AvatarsDeleted.Inc()
+	observability.LoggerFromContext(ctx).Info("user avatar deleted", "user_id", userID, "avatar_id", avatar.ID)
+	return nil
 }
 
 func (s *AvatarService) publishDelete(ctx context.Context, avatar *domain.Avatar) error {

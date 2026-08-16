@@ -2,9 +2,9 @@ package services
 
 import (
 	"context"
-	"log"
 
 	"github.com/practicum/gophprofile/internal/domain"
+	"github.com/practicum/gophprofile/internal/observability"
 )
 
 type HealthService struct {
@@ -24,21 +24,31 @@ func (s *HealthService) Check(ctx context.Context) domain.HealthResponse {
 		"broker":   "ok",
 	}
 	status := "ok"
+	logger := observability.LoggerFromContext(ctx)
 
 	if err := s.repo.Ping(ctx); err != nil {
-		log.Printf("health: postgres: %v", err)
+		logger.Error("health postgres unavailable", "error", err)
 		components["postgres"] = "unavailable"
 		status = "degraded"
+		observability.HealthChecks.WithLabelValues("postgres").Set(0)
+	} else {
+		observability.HealthChecks.WithLabelValues("postgres").Set(1)
 	}
 	if err := s.storage.Ping(ctx); err != nil {
-		log.Printf("health: s3: %v", err)
+		logger.Error("health s3 unavailable", "error", err)
 		components["s3"] = "unavailable"
 		status = "degraded"
+		observability.HealthChecks.WithLabelValues("s3").Set(0)
+	} else {
+		observability.HealthChecks.WithLabelValues("s3").Set(1)
 	}
 	if err := s.broker.Ping(ctx); err != nil {
-		log.Printf("health: broker: %v", err)
+		logger.Error("health broker unavailable", "error", err)
 		components["broker"] = "unavailable"
 		status = "degraded"
+		observability.HealthChecks.WithLabelValues("broker").Set(0)
+	} else {
+		observability.HealthChecks.WithLabelValues("broker").Set(1)
 	}
 
 	return domain.HealthResponse{

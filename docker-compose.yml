@@ -62,6 +62,152 @@ services:
         condition: service_healthy
     restart: "no"
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - server
+      - worker
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    depends_on:
+      - alert-webhook
+
+  alert-webhook:
+    image: mendhak/http-https-echo:31
+    ports:
+      - "9094:8080"
+
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  opensearch-init:
+    image: curlimages/curl:8.10.1
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        curl -sS -X PUT "http://opensearch:9200/_index_template/gophprofile-logs" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "index_patterns": ["gophprofile-logs*"],
+            "template": {
+              "mappings": {
+                "properties": {
+                  "@timestamp": {"type": "date"},
+                  "msg": {"type": "text"},
+                  "level": {"type": "keyword"},
+                  "service": {"type": "keyword"},
+                  "job": {"type": "keyword"},
+                  "trace_id": {"type": "keyword"},
+                  "span_id": {"type": "keyword"},
+                  "request_id": {"type": "keyword"}
+                }
+              }
+            }
+          }'
+        echo
+        echo "opensearch index template ready"
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.15.0
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      opensearch-init:
+        condition: service_completed_successfully
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.1.9
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    volumes:
+      - ./monitoring/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./monitoring/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_INSTALL_PLUGINS: grafana-opensearch-datasource
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - opensearch
+      - jaeger
+
   server:
     build: .
     command: ["/app/server"]
@@ -80,6 +226,8 @@ services:
       RABBITMQ_EXCHANGE: avatars.exchange
       PUBLIC_URL: http://localhost:8080
       WEB_DIR: /app/web
+      OTEL_SERVICE_NAME: gophprofile-server
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4318
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,10 +237,22 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+      fluent-bit:
+        condition: service_started
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: gophprofile.server
+        fluentd-async: "true"
 
   worker:
     build: .
     command: ["/app/worker"]
+    ports:
+      - "9091:9091"
     environment:
       DATABASE_URL: postgres://gophprofile:gophprofile@postgres:5432/gophprofile?sslmode=disable
       S3_ENDPOINT: minio:9000
@@ -104,6 +264,9 @@ services:
       BROKER_URL: amqp://guest:guest@rabbitmq:5672/
       RABBITMQ_EXCHANGE: avatars.exchange
       WEB_DIR: /app/web
+      METRICS_ADDR: ":9091"
+      OTEL_SERVICE_NAME: gophprofile-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4318
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,7 +276,21 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      jaeger:
+        condition: service_started
+      fluent-bit:
+        condition: service_started
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: "127.0.0.1:24224"
+        tag: gophprofile.worker
+        fluentd-async: "true"
 
 volumes:
   postgres_data:
   minio_data:
+  prometheus_data:
+  alertmanager_data:
+  opensearch_data:
+  grafana_data:

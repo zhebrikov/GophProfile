@@ -12,16 +12,21 @@
 - Мягкое удаление с асинхронной очисткой файлов в S3
 - Healthcheck с проверкой БД, S3 и брокера
 - Docker и Docker Compose для локального запуска
+- Observability: OpenTelemetry → Jaeger, Prometheus + Grafana, OpenSearch + Dashboards, Alertmanager
 
 ## Стек
 
 | Компонент | Технология |
 |-----------|------------|
 | Язык | Go 1.25+ |
-| HTTP | Echo / Chi |
+| HTTP | Echo |
 | БД | PostgreSQL |
 | Файлы | MinIO (S3) |
 | Очереди | RabbitMQ (topic exchange) |
+| Метрики | Prometheus |
+| Логи | slog (JSON) → Fluent Bit → OpenSearch |
+| Трейсы | OpenTelemetry → Jaeger |
+| Дашборды / алерты | Grafana, OpenSearch Dashboards, Alertmanager |
 | Контейнеры | Docker, Docker Compose |
 
 ## Архитектура
@@ -60,27 +65,66 @@
 ## Структура проекта
 
 ```
-avatars-service/
+GophProfile/
 ├── cmd/
 │   ├── server/          # HTTP API и веб-интерфейс
 │   ├── worker/          # Асинхронная обработка
 │   └── migrate/         # Применение миграций (goose)
 ├── internal/
-│   ├── api/
 │   ├── config/
 │   ├── domain/
 │   ├── handlers/
+│   ├── middleware/
+│   ├── observability/   # логи, метрики, трейсинг
 │   ├── repository/
 │   ├── services/
 │   └── worker/
 ├── pkg/
-├── web/                 # Готовый SPA / статика
+├── monitoring/          # Prometheus, Grafana, OpenSearch, Fluent Bit, Alertmanager
+├── web/
 ├── migrations/
-├── docker/
-├── k8s/
-└── tests/
+└── docker-compose.yml
 ```
 
+## Observability
+
+После `docker compose up -d --build` доступны:
+
+| Сервис | URL | Назначение |
+|--------|-----|------------|
+| Grafana | http://localhost:3000 (admin/admin) | Дашборды, Explore (логи/метрики/трейсы) |
+| Prometheus | http://localhost:9090 | Метрики и правила алертов |
+| Alertmanager | http://localhost:9093 | Алерты |
+| Alert webhook | http://localhost:9094 | Приём webhook-нотификаций алертов |
+| Jaeger | http://localhost:16686 | Distributed tracing |
+| OpenSearch | http://localhost:9200 | Индекс логов |
+| OpenSearch Dashboards | http://localhost:5601 | Поиск и фильтрация логов |
+| App metrics | http://localhost:8080/metrics | Server scrape |
+| Worker metrics | http://localhost:9091/metrics | Worker scrape |
+
+**Трейсинг:** W3C Trace Context; спаны HTTP → service → repository/S3/RabbitMQ → worker. Корреляция через `trace_id` в JSON-логах и в Jaeger.
+
+**Метрики (business):** `gophprofile_avatars_uploaded_total`, `gophprofile_avatars_processed_total`, `gophprofile_avatar_processing_duration_seconds`, `gophprofile_avatars_deleted_total`, HTTP RED.
+
+**Логи:** структурированный JSON (`slog`) с `request_id`, `trace_id`, `span_id`; Fluent Bit забирает stdout контейнеров `server`/`worker` в OpenSearch (`gophprofile-logs-*`). Поиск: OpenSearch Dashboards (Discover) или Grafana Explore → OpenSearch. При первом заходе в Dashboards создайте index pattern `gophprofile-logs*`, time field `@timestamp`. Примеры фильтров: `service:server`, `trace_id:<id>`, `level:ERROR`.
+
+**Алерты:** high 5xx rate, high p95 latency, processing failures, health component down. Нотификации уходят в Alertmanager UI и на webhook `:9094`.
+
+### Проверка алертов (тестовые сценарии)
+
+1. **HealthComponentDown** — остановите зависимость и дергайте health:
+   ```bash
+   docker compose stop postgres
+   curl -s http://localhost:8080/health
+   # через ~1–2 мин: Prometheus → Alerts / Alertmanager → HealthComponentDown
+   docker compose start postgres
+   ```
+2. **HighHTTPErrorRate** — много запросов к несуществующему ресурсу с ошибками сервера (или временно сломайте S3) до доли 5xx > 5% в течение 2 минут.
+3. **AvatarProcessingFailures** — опубликуйте событие с невалидным `s3_key`, чтобы worker писал `status=failed`; через ~2 мин сработает алерт.
+
+После срабатывания проверьте:
+- http://localhost:9093/#/alerts
+- http://localhost:9094 (тело webhook от Alertmanager)
 ## API
 
 ### Загрузка аватарки
@@ -245,23 +289,22 @@ type AvatarDeleteEvent struct {
 docker compose up -d --build
 ```
 
-Поднимаются: **migrate** (однократно), **server**, **worker**, PostgreSQL, MinIO, брокер сообщений.
+Поднимаются: **migrate**, **server**, **worker**, PostgreSQL, MinIO, RabbitMQ, **Jaeger**, **Prometheus**, **Alertmanager**, **OpenSearch**, **Fluent Bit**, **Grafana**.
 
 ### Локальная разработка
 
 ```bash
 # Зависимости инфраструктуры
-docker compose up -d postgres minio rabbitmq
+docker compose up -d postgres minio rabbitmq jaeger
 
 # Миграции (goose; отдельно от server/worker)
 go run ./cmd/migrate -command up
 # или: make migrate
 
-# Сервер и worker
-go run ./cmd/server
-go run ./cmd/worker
+# Сервер и worker (с экспортом трейсов в локальный Jaeger)
+OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 go run ./cmd/server
+OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 go run ./cmd/worker
 ```
-
 Откат последней миграции: `go run ./cmd/migrate -command down`. Статус: `go run ./cmd/migrate -command status`.
 
 Если PostgreSQL уже поднимался со старой схемой без goose, пересоздайте том: `docker compose down -v`, затем снова `docker compose up -d --build`.
@@ -288,6 +331,9 @@ make cover   # цель: >50% на internal/ и pkg/
 | `S3_SECRET_KEY` | Secret key |
 | `S3_BUCKET` | Имя бакета |
 | `BROKER_URL` | URL RabbitMQ / Kafka |
+| `OTEL_SERVICE_NAME` | Имя сервиса в трейсах |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint (`host:port`, без схемы) |
+| `METRICS_ADDR` | Адрес `/metrics` у worker (по умолчанию `:9091`) |
 
 ## Безопасность (бонус)
 
@@ -299,7 +345,9 @@ make cover   # цель: >50% на internal/ и pkg/
 
 ## Roadmap
 
-Проект разделён на три спринта. **Спринт 1 (MVP):** REST API, PostgreSQL, MinIO, асинхронная обработка, Docker Compose, тесты. Последующие спринты — Kubernetes и Observability (Prometheus, Grafana, Loki/ELK/OpenSearch, Jaeger).
+**Спринт 1 (MVP):** REST API, PostgreSQL, MinIO, асинхронная обработка, Docker Compose, тесты.  
+**Observability:** Prometheus, Grafana, OpenSearch, Jaeger, Alertmanager — реализовано.
+Последующие спринты — Kubernetes.
 
 ## Лицензия
 

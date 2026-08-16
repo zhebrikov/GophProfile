@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -15,6 +15,7 @@ import (
 	"github.com/practicum/gophprofile/internal/config"
 	"github.com/practicum/gophprofile/internal/handlers"
 	appmw "github.com/practicum/gophprofile/internal/middleware"
+	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
 	"github.com/practicum/gophprofile/pkg/broker"
@@ -24,20 +25,39 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		panic(err)
 	}
+
+	serviceName := cfg.ServiceName
+	if serviceName == "" || serviceName == "gophprofile" {
+		serviceName = "gophprofile-server"
+	}
+	observability.SetupLogger(serviceName)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	shutdownTracing, err := observability.SetupTracing(ctx, serviceName, cfg.OTLPEndpoint)
+	if err != nil {
+		slog.Error("tracing setup failed", "error", err)
+		panic(err)
+	}
+	defer func() {
+		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		_ = shutdownTracing(shutdownCtx)
+	}()
+
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("postgres: %v", err)
+		slog.Error("postgres", "error", err)
+		panic(err)
 	}
 	defer pool.Close()
 
 	if err := waitFor(ctx, "postgres", func() error { return pool.Ping(ctx) }); err != nil {
-		log.Fatalf("postgres: %v", err)
+		slog.Error("postgres", "error", err)
+		panic(err)
 	}
 
 	store, err := storage.NewS3Storage(
@@ -45,19 +65,23 @@ func main() {
 		cfg.S3.Bucket, cfg.S3.UseSSL, cfg.S3.PublicEndpoint,
 	)
 	if err != nil {
-		log.Fatalf("s3: %v", err)
+		slog.Error("s3", "error", err)
+		panic(err)
 	}
 	if err := waitFor(ctx, "s3", func() error { return store.EnsureBucket(ctx) }); err != nil {
-		log.Fatalf("s3: %v", err)
+		slog.Error("s3", "error", err)
+		panic(err)
 	}
 
 	mq, err := waitForBroker(ctx, cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
 	if err != nil {
-		log.Fatalf("rabbitmq: %v", err)
+		slog.Error("rabbitmq", "error", err)
+		panic(err)
 	}
 	defer func() { _ = mq.Close() }()
 	if err := mq.SetupQueues(); err != nil {
-		log.Fatalf("rabbitmq queues: %v", err)
+		slog.Error("rabbitmq queues", "error", err)
+		panic(err)
 	}
 
 	repo := repository.NewAvatarRepository(pool)
@@ -67,23 +91,28 @@ func main() {
 
 	web, err := handlers.NewWebHandler(avatarSvc, cfg.WebDir)
 	if err != nil {
-		log.Fatalf("web: %v", err)
+		slog.Error("web", "error", err)
+		panic(err)
 	}
 
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(echomw.Recover())
-	e.Use(echomw.Logger())
+	e.Use(observability.EchoTracingMiddleware(serviceName))
+	e.Use(observability.RequestIDMiddleware)
+	e.Use(observability.EchoMetricsMiddleware())
 	e.Use(echomw.BodyLimit(fmt.Sprintf("%dM", cfg.MaxFileSize/(1024*1024)+1)))
 	e.Use(echomw.CORSWithConfig(echomw.CORSConfig{
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
-		AllowHeaders: []string{echo.HeaderContentType, "X-User-ID"},
+		AllowOrigins:  []string{"*"},
+		AllowMethods:  []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
+		AllowHeaders:  []string{echo.HeaderContentType, "X-User-ID", observability.RequestIDHeader, "traceparent", "tracestate"},
+		ExposeHeaders: []string{observability.RequestIDHeader},
 	}))
 
 	limiter := appmw.NewRateLimiter(cfg.RateLimit, int(cfg.RateLimit*2))
 	e.Use(limiter.Middleware)
 
+	e.GET("/metrics", echo.WrapHandler(observability.MetricsHandler()))
 	e.GET("/health", api.Health)
 
 	v1 := e.Group("/api/v1")
@@ -105,7 +134,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("server listening on %s", cfg.HTTPAddr)
+		slog.Info("server listening", "addr", cfg.HTTPAddr)
 		errCh <- e.Start(cfg.HTTPAddr)
 	}()
 
@@ -118,14 +147,14 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout())
 	defer shutdownCancel()
 	if err := e.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown: %v", err)
+		slog.Error("shutdown", "error", err)
 	}
 
 	if serverErr == nil {
 		serverErr = <-errCh
 	}
 	if serverErr != nil && serverErr != http.ErrServerClosed {
-		log.Printf("server: %v", serverErr)
+		slog.Error("server", "error", serverErr)
 	}
 }
 
@@ -137,7 +166,7 @@ func waitFor(ctx context.Context, name string, fn func() error) error {
 		} else {
 			last = err
 		}
-		log.Printf("waiting for %s: %v", name, last)
+		slog.Info("waiting for dependency", "name", name, "error", last)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -155,7 +184,7 @@ func waitForBroker(ctx context.Context, url, exchange string) (*broker.RabbitMQ,
 			return mq, nil
 		}
 		last = err
-		log.Printf("waiting for rabbitmq: %v", last)
+		slog.Info("waiting for rabbitmq", "error", last)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

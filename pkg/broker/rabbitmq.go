@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
+	"github.com/practicum/gophprofile/internal/observability"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -77,18 +82,41 @@ func (r *RabbitMQ) Close() error {
 }
 
 func (r *RabbitMQ) Publish(ctx context.Context, routingKey string, payload any) error {
+	tracer := otel.Tracer("gophprofile/broker")
+	ctx, span := tracer.Start(ctx, "broker.publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("messaging.destination", r.exchange),
+			attribute.String("messaging.rabbitmq.routing_key", routingKey),
+		),
+	)
+	defer span.End()
+
 	body, err := json.Marshal(payload)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
-	return r.channel.PublishWithContext(ctx, r.exchange, routingKey, false, false, amqp.Publishing{
+	headers := amqp.Table{}
+	otel.GetTextMapPropagator().Inject(ctx, amqpHeaderCarrier(headers))
+
+	err = r.channel.PublishWithContext(ctx, r.exchange, routingKey, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Timestamp:    time.Now().UTC(),
 		Body:         body,
 		MessageId:    extractMessageID(payload),
+		Headers:      headers,
 	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 func extractMessageID(payload any) string {
@@ -140,6 +168,8 @@ func (r *RabbitMQ) Consume(ctx context.Context, queue string, handler MessageHan
 		return err
 	}
 
+	tracer := otel.Tracer("gophprofile/broker")
+
 	go func() {
 		for {
 			select {
@@ -147,16 +177,31 @@ func (r *RabbitMQ) Consume(ctx context.Context, queue string, handler MessageHan
 				return
 			case d, ok := <-deliveries:
 				if !ok {
-					log.Printf("broker: delivery channel closed for queue %s", queue)
+					slog.Warn("broker delivery channel closed", "queue", queue)
 					return
 				}
-				if err := handler(ctx, d.Body); err != nil {
-					log.Printf("broker: handler error on %s: %v", queue, err)
-					// Requeue only transient failures; avoid tight loops by delaying.
+
+				msgCtx := otel.GetTextMapPropagator().Extract(ctx, amqpHeaderCarrier(d.Headers))
+				msgCtx, span := tracer.Start(msgCtx, "broker.consume "+queue,
+					trace.WithSpanKind(trace.SpanKindConsumer),
+					trace.WithAttributes(
+						attribute.String("messaging.system", "rabbitmq"),
+						attribute.String("messaging.destination", queue),
+						attribute.String("messaging.message_id", d.MessageId),
+					),
+				)
+
+				err := handler(msgCtx, d.Body)
+				if err != nil {
+					span.RecordError(err)
+					span.SetStatus(codes.Error, err.Error())
+					observability.LoggerFromContext(msgCtx).Error("broker handler error", "queue", queue, "error", err)
+					span.End()
 					time.Sleep(time.Second)
 					_ = d.Nack(false, true)
 					continue
 				}
+				span.End()
 				_ = d.Ack(false)
 			}
 		}

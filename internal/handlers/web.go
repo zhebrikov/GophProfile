@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/labstack/echo/v4"
+	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/services"
 )
 
@@ -80,7 +81,7 @@ func (h *WebHandler) mapWebUploadError(c echo.Context, err error) error {
 	case errors.Is(err, services.ErrInvalidUserID):
 		return h.renderUploadError(c, "Invalid user ID")
 	default:
-		c.Logger().Error(err)
+		observability.LoggerFromContext(c.Request().Context()).Error("web upload failed", "error", err)
 		c.Response().WriteHeader(http.StatusInternalServerError)
 		return h.tmpl.ExecuteTemplate(c.Response(), "upload.html", map[string]any{
 			"Title": "Upload Avatar",

@@ -8,14 +8,17 @@ import (
 )
 
 type Config struct {
-	HTTPAddr    string
-	DatabaseURL string
-	S3          S3Config
-	RabbitMQ    RabbitMQConfig
-	PublicURL   string
-	WebDir      string
-	MaxFileSize int64
-	RateLimit   float64
+	HTTPAddr     string
+	DatabaseURL  string
+	S3           S3Config
+	RabbitMQ     RabbitMQConfig
+	PublicURL    string
+	WebDir       string
+	MaxFileSize  int64
+	RateLimit    float64
+	ServiceName  string
+	OTLPEndpoint string // host:port for OTLP HTTP (e.g. jaeger:4318)
+	MetricsAddr  string // worker metrics listen address
 }
 
 type S3Config struct {
@@ -46,13 +49,24 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	dbURL, dbSet := os.LookupEnv("DATABASE_URL")
+	if dbSet && dbURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
+	if !dbSet || dbURL == "" {
+		dbURL = "postgres://gophprofile:gophprofile@localhost:5432/gophprofile?sslmode=disable"
+	}
+
 	cfg := &Config{
-		HTTPAddr:    getEnv("HTTP_ADDR", ":8080"),
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://gophprofile:gophprofile@localhost:5432/gophprofile?sslmode=disable"),
-		PublicURL:   getEnv("PUBLIC_URL", "http://localhost:8080"),
-		WebDir:      getEnv("WEB_DIR", "web"),
-		MaxFileSize: maxFileSize,
-		RateLimit:   rateLimit,
+		HTTPAddr:     getEnv("HTTP_ADDR", ":8080"),
+		DatabaseURL:  dbURL,
+		PublicURL:    getEnv("PUBLIC_URL", "http://localhost:8080"),
+		WebDir:       getEnv("WEB_DIR", "web"),
+		MaxFileSize:  maxFileSize,
+		RateLimit:    rateLimit,
+		ServiceName:  getEnv("OTEL_SERVICE_NAME", "gophprofile"),
+		OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		MetricsAddr:  getEnv("METRICS_ADDR", ":9091"),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", "localhost:9000"),
 			AccessKey:      getEnv("S3_ACCESS_KEY", "minioadmin"),
@@ -71,7 +85,7 @@ func Load() (*Config, error) {
 }
 
 func getEnv(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
 	}
 	return fallback

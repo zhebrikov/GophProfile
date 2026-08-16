@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/practicum/gophprofile/internal/config"
+	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/worker"
 	"github.com/practicum/gophprofile/pkg/broker"
@@ -18,20 +20,39 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		panic(err)
 	}
+
+	serviceName := cfg.ServiceName
+	if serviceName == "" || serviceName == "gophprofile" {
+		serviceName = "gophprofile-worker"
+	}
+	observability.SetupLogger(serviceName)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	shutdownTracing, err := observability.SetupTracing(ctx, serviceName, cfg.OTLPEndpoint)
+	if err != nil {
+		slog.Error("tracing setup failed", "error", err)
+		panic(err)
+	}
+	defer func() {
+		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		_ = shutdownTracing(shutdownCtx)
+	}()
+
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("postgres: %v", err)
+		slog.Error("postgres", "error", err)
+		panic(err)
 	}
 	defer pool.Close()
 
 	if err := waitFor(ctx, "postgres", func() error { return pool.Ping(ctx) }); err != nil {
-		log.Fatalf("postgres: %v", err)
+		slog.Error("postgres", "error", err)
+		panic(err)
 	}
 
 	store, err := storage.NewS3Storage(
@@ -39,24 +60,49 @@ func main() {
 		cfg.S3.Bucket, cfg.S3.UseSSL, cfg.S3.PublicEndpoint,
 	)
 	if err != nil {
-		log.Fatalf("s3: %v", err)
+		slog.Error("s3", "error", err)
+		panic(err)
 	}
 	if err := waitFor(ctx, "s3", func() error { return store.EnsureBucket(ctx) }); err != nil {
-		log.Fatalf("s3: %v", err)
+		slog.Error("s3", "error", err)
+		panic(err)
 	}
 
 	mq, err := waitForBroker(ctx, cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
 	if err != nil {
-		log.Fatalf("rabbitmq: %v", err)
+		slog.Error("rabbitmq", "error", err)
+		panic(err)
 	}
 	defer func() { _ = mq.Close() }()
 
 	repo := repository.NewAvatarRepository(pool)
 	w := worker.New(repo, store, mq)
 
-	log.Println("worker starting")
-	if err := w.Start(ctx); err != nil && err != context.Canceled {
-		log.Fatalf("worker: %v", err)
+	metricsAddr := cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           observability.MetricsHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		slog.Info("worker metrics listening", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("metrics server", "error", err)
+		}
+	}()
+
+	slog.Info("worker starting")
+	err = w.Start(ctx)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	_ = metricsSrv.Shutdown(shutdownCtx)
+
+	if err != nil && err != context.Canceled {
+		slog.Error("worker", "error", err)
+		panic(err)
 	}
 }
 
@@ -68,7 +114,7 @@ func waitFor(ctx context.Context, name string, fn func() error) error {
 		} else {
 			last = err
 		}
-		log.Printf("waiting for %s: %v", name, last)
+		slog.Info("waiting for dependency", "name", name, "error", last)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -86,7 +132,7 @@ func waitForBroker(ctx context.Context, url, exchange string) (*broker.RabbitMQ,
 			return mq, nil
 		}
 		last = err
-		log.Printf("waiting for rabbitmq: %v", last)
+		slog.Info("waiting for rabbitmq", "error", last)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
