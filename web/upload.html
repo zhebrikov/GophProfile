@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Title}} — GophProfile</title>
+  <link rel="stylesheet" href="/web/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <a class="brand" href="/web/upload">GophProfile</a>
+      <nav>
+        <a href="/web/upload">Загрузка</a>
+      </nav>
+    </header>
+
+    <main class="main">
+      <section class="hero-panel">
+        <h1>Загрузка аватарки</h1>
+        <p class="lead">Загрузите фото один раз — сервисы смогут запросить аватар по вашему ID.</p>
+
+        {{if .Error}}
+        <div class="alert alert-error">{{.Error}}</div>
+        {{end}}
+
+        {{if .Success}}
+        <div class="alert alert-ok">
+          Аватарка загружена и обрабатывается.
+          <a href="/api/v1/avatars/{{.Avatar.ID}}">Открыть</a> ·
+          <a href="/web/gallery/{{.UserID}}">Галерея</a>
+        </div>
+        {{end}}
+
+        <form id="upload-form" class="upload-form" action="/web/upload" method="post" enctype="multipart/form-data">
+          <label class="field">
+            <span>User ID</span>
+            <input type="text" name="user_id" id="user_id" required placeholder="user-123" value="{{.UserID}}">
+          </label>
+
+          <label class="dropzone" id="dropzone">
+            <input type="file" name="file" id="file" accept="image/jpeg,image/png,image/webp" required hidden>
+            <div class="dropzone-inner">
+              <strong>Перетащите изображение сюда</strong>
+              <span>или нажмите, чтобы выбрать (JPEG, PNG, WebP · до 10 MB)</span>
+            </div>
+            <img id="preview" class="preview" alt="Превью" hidden>
+          </label>
+
+          <button type="submit" class="btn">Загрузить</button>
+        </form>
+      </section>
+    </main>
+  </div>
+  <script src="/web/static/upload.js"></script>
+</body>
+</html>

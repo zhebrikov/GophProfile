@@ -1,0 +1,9 @@
+.git
+coverage.out
+*.test
+.DS_Store
+.env
+.idea
+.vscode
+tmp
+bin

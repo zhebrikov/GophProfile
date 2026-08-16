@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Title}} — GophProfile</title>
+  <link rel="stylesheet" href="/web/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <a class="brand" href="/web/upload">GophProfile</a>
+      <nav>
+        <a href="/web/upload">Загрузка</a>
+        <a href="/web/gallery/{{.UserID}}">Галерея</a>
+      </nav>
+    </header>
+
+    <main class="main">
+      <section class="hero-panel">
+        <h1>Галерея · {{.UserID}}</h1>
+        <p class="lead">Все аватарки пользователя</p>
+
+        <div id="gallery-alert" class="alert" hidden></div>
+
+        {{if not .Avatars}}
+        <p class="empty">Пока нет аватарок. <a href="/web/upload">Загрузить первую</a></p>
+        {{else}}
+        <div class="gallery" id="gallery" data-user-id="{{.UserID}}">
+          {{range .Avatars}}
+          <figure class="gallery-item" data-avatar-id="{{.ID}}">
+            <a href="/api/v1/avatars/{{.ID}}">
+              <img src="/api/v1/avatars/{{.ID}}?size=300x300" alt="{{.FileName}}" loading="lazy">
+            </a>
+            <figcaption>
+              <span>{{.FileName}}</span>
+              <span class="meta">{{.Status}} · {{.Dimensions.Width}}×{{.Dimensions.Height}}</span>
+              <div class="gallery-actions">
+                <a href="/api/v1/avatars/{{.ID}}/metadata">metadata</a>
+                <button type="button" class="btn-delete" data-avatar-id="{{.ID}}">Удалить</button>
+              </div>
+            </figcaption>
+          </figure>
+          {{end}}
+        </div>
+        {{end}}
+      </section>
+    </main>
+  </div>
+  <script src="/web/static/gallery.js"></script>
+</body>
+</html>
