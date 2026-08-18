@@ -14,6 +14,7 @@ import (
 	"github.com/practicum/gophprofile/pkg/broker"
 	"github.com/practicum/gophprofile/pkg/imageutil"
 	"go.opentelemetry.io/otel"
+	"golang.org/x/sync/errgroup"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -52,16 +53,16 @@ func (w *Worker) Start(ctx context.Context) error {
 		return err
 	}
 
-	if err := w.broker.Consume(ctx, broker.QueueProcess, w.handleUploadMessage); err != nil {
-		return err
-	}
-	if err := w.broker.Consume(ctx, broker.QueueDelete, w.handleDeleteMessage); err != nil {
-		return err
-	}
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		return w.broker.Consume(ctx, broker.QueueProcess, w.handleUploadMessage)
+	})
+	g.Go(func() error {
+		return w.broker.Consume(ctx, broker.QueueDelete, w.handleDeleteMessage)
+	})
 
 	slog.Info("worker consuming queues")
-	<-ctx.Done()
-	return ctx.Err()
+	return g.Wait()
 }
 
 func (w *Worker) handleUploadMessage(ctx context.Context, body []byte) error {

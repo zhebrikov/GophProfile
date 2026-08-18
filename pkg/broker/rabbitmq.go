@@ -170,43 +170,40 @@ func (r *RabbitMQ) Consume(ctx context.Context, queue string, handler MessageHan
 
 	tracer := otel.Tracer("gophprofile/broker")
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case d, ok := <-deliveries:
-				if !ok {
-					slog.Warn("broker delivery channel closed", "queue", queue)
-					return
-				}
-
-				msgCtx := otel.GetTextMapPropagator().Extract(ctx, amqpHeaderCarrier(d.Headers))
-				msgCtx, span := tracer.Start(msgCtx, "broker.consume "+queue,
-					trace.WithSpanKind(trace.SpanKindConsumer),
-					trace.WithAttributes(
-						attribute.String("messaging.system", "rabbitmq"),
-						attribute.String("messaging.destination", queue),
-						attribute.String("messaging.message_id", d.MessageId),
-					),
-				)
-
-				err := handler(msgCtx, d.Body)
-				if err != nil {
-					span.RecordError(err)
-					span.SetStatus(codes.Error, err.Error())
-					observability.LoggerFromContext(msgCtx).Error("broker handler error", "queue", queue, "error", err)
-					span.End()
-					time.Sleep(time.Second)
-					_ = d.Nack(false, true)
-					continue
-				}
-				span.End()
-				_ = d.Ack(false)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case d, ok := <-deliveries:
+			if !ok {
+				slog.Warn("broker delivery channel closed", "queue", queue)
+				return fmt.Errorf("delivery channel closed: queue %s", queue)
 			}
+
+			msgCtx := otel.GetTextMapPropagator().Extract(ctx, amqpHeaderCarrier(d.Headers))
+			msgCtx, span := tracer.Start(msgCtx, "broker.consume "+queue,
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "rabbitmq"),
+					attribute.String("messaging.destination", queue),
+					attribute.String("messaging.message_id", d.MessageId),
+				),
+			)
+
+			err := handler(msgCtx, d.Body)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				observability.LoggerFromContext(msgCtx).Error("broker handler error", "queue", queue, "error", err)
+				span.End()
+				time.Sleep(time.Second)
+				_ = d.Nack(false, true)
+				continue
+			}
+			span.End()
+			_ = d.Ack(false)
 		}
-	}()
-	return nil
+	}
 }
 
 func RetryWithBackoff(ctx context.Context, attempts int, base time.Duration, fn func() error) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -25,7 +26,8 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		panic(err)
+		slog.Error("config", "error", err)
+		os.Exit(1)
 	}
 
 	serviceName := cfg.ServiceName
@@ -40,7 +42,7 @@ func main() {
 	shutdownTracing, err := observability.SetupTracing(ctx, serviceName, cfg.OTLPEndpoint)
 	if err != nil {
 		slog.Error("tracing setup failed", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 	defer func() {
 		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
@@ -51,13 +53,13 @@ func main() {
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("postgres", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
 	if err := waitFor(ctx, "postgres", func() error { return pool.Ping(ctx) }); err != nil {
 		slog.Error("postgres", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 
 	store, err := storage.NewS3Storage(
@@ -66,22 +68,22 @@ func main() {
 	)
 	if err != nil {
 		slog.Error("s3", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 	if err := waitFor(ctx, "s3", func() error { return store.EnsureBucket(ctx) }); err != nil {
 		slog.Error("s3", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 
 	mq, err := waitForBroker(ctx, cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
 	if err != nil {
 		slog.Error("rabbitmq", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 	defer func() { _ = mq.Close() }()
 	if err := mq.SetupQueues(); err != nil {
 		slog.Error("rabbitmq queues", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 
 	repo := repository.NewAvatarRepository(pool)
@@ -92,7 +94,7 @@ func main() {
 	web, err := handlers.NewWebHandler(avatarSvc, cfg.WebDir)
 	if err != nil {
 		slog.Error("web", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 
 	e := echo.New()

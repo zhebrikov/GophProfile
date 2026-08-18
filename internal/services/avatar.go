@@ -57,7 +57,7 @@ func (s *AvatarService) Upload(ctx context.Context, userID, fileName string, rea
 
 	data, err := imageutil.ReadLimited(reader, s.maxSize)
 	if err != nil {
-		if err == imageutil.ErrTooLarge {
+		if errors.Is(err, imageutil.ErrTooLarge) {
 			return nil, ErrFileTooLarge
 		}
 		span.RecordError(err)

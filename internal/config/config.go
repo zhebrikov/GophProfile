@@ -49,12 +49,22 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	dbURL, dbSet := os.LookupEnv("DATABASE_URL")
-	if dbSet && dbURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL is required")
+	dbURL, err := requireEnv("DATABASE_URL")
+	if err != nil {
+		return nil, err
 	}
-	if !dbSet || dbURL == "" {
-		dbURL = "postgres://gophprofile:gophprofile@localhost:5432/gophprofile?sslmode=disable"
+
+	s3AccessKey, err := requireEnv("S3_ACCESS_KEY")
+	if err != nil {
+		return nil, err
+	}
+	s3SecretKey, err := requireEnv("S3_SECRET_KEY")
+	if err != nil {
+		return nil, err
+	}
+	brokerURL, err := requireEnv("BROKER_URL")
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &Config{
@@ -69,19 +79,26 @@ func Load() (*Config, error) {
 		MetricsAddr:  getEnv("METRICS_ADDR", ":9091"),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", "localhost:9000"),
-			AccessKey:      getEnv("S3_ACCESS_KEY", "minioadmin"),
-			SecretKey:      getEnv("S3_SECRET_KEY", "minioadmin"),
+			AccessKey:      s3AccessKey,
+			SecretKey:      s3SecretKey,
 			Bucket:         getEnv("S3_BUCKET", "avatars"),
 			UseSSL:         useSSL,
 			PublicEndpoint: getEnv("S3_PUBLIC_ENDPOINT", "http://localhost:9000"),
 		},
 		RabbitMQ: RabbitMQConfig{
-			URL:      getEnv("BROKER_URL", "amqp://guest:guest@localhost:5672/"),
+			URL:      brokerURL,
 			Exchange: getEnv("RABBITMQ_EXCHANGE", "avatars.exchange"),
 		},
 	}
 
 	return cfg, nil
+}
+
+func requireEnv(key string) (string, error) {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("%s is required", key)
 }
 
 func getEnv(key, fallback string) string {
