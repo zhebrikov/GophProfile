@@ -8,14 +8,17 @@ import (
 )
 
 type Config struct {
-	HTTPAddr    string
-	DatabaseURL string
-	S3          S3Config
-	RabbitMQ    RabbitMQConfig
-	PublicURL   string
-	WebDir      string
-	MaxFileSize int64
-	RateLimit   float64
+	HTTPAddr     string
+	DatabaseURL  string
+	S3           S3Config
+	RabbitMQ     RabbitMQConfig
+	PublicURL    string
+	WebDir       string
+	MaxFileSize  int64
+	RateLimit    float64
+	ServiceName  string
+	OTLPEndpoint string // host:port for OTLP HTTP (e.g. jaeger:4318)
+	MetricsAddr  string // worker metrics listen address
 }
 
 type S3Config struct {
@@ -46,23 +49,44 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	dbURL, err := requireEnv("DATABASE_URL")
+	if err != nil {
+		return nil, err
+	}
+
+	s3AccessKey, err := requireEnv("S3_ACCESS_KEY")
+	if err != nil {
+		return nil, err
+	}
+	s3SecretKey, err := requireEnv("S3_SECRET_KEY")
+	if err != nil {
+		return nil, err
+	}
+	brokerURL, err := requireEnv("BROKER_URL")
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
-		HTTPAddr:    getEnv("HTTP_ADDR", ":8080"),
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://gophprofile:gophprofile@localhost:5432/gophprofile?sslmode=disable"),
-		PublicURL:   getEnv("PUBLIC_URL", "http://localhost:8080"),
-		WebDir:      getEnv("WEB_DIR", "web"),
-		MaxFileSize: maxFileSize,
-		RateLimit:   rateLimit,
+		HTTPAddr:     getEnv("HTTP_ADDR", ":8080"),
+		DatabaseURL:  dbURL,
+		PublicURL:    getEnv("PUBLIC_URL", "http://localhost:8080"),
+		WebDir:       getEnv("WEB_DIR", "web"),
+		MaxFileSize:  maxFileSize,
+		RateLimit:    rateLimit,
+		ServiceName:  getEnv("OTEL_SERVICE_NAME", "gophprofile"),
+		OTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		MetricsAddr:  getEnv("METRICS_ADDR", ":9091"),
 		S3: S3Config{
 			Endpoint:       getEnv("S3_ENDPOINT", "localhost:9000"),
-			AccessKey:      getEnv("S3_ACCESS_KEY", "minioadmin"),
-			SecretKey:      getEnv("S3_SECRET_KEY", "minioadmin"),
+			AccessKey:      s3AccessKey,
+			SecretKey:      s3SecretKey,
 			Bucket:         getEnv("S3_BUCKET", "avatars"),
 			UseSSL:         useSSL,
 			PublicEndpoint: getEnv("S3_PUBLIC_ENDPOINT", "http://localhost:9000"),
 		},
 		RabbitMQ: RabbitMQConfig{
-			URL:      getEnv("BROKER_URL", "amqp://guest:guest@localhost:5672/"),
+			URL:      brokerURL,
 			Exchange: getEnv("RABBITMQ_EXCHANGE", "avatars.exchange"),
 		},
 	}
@@ -70,8 +94,15 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+func requireEnv(key string) (string, error) {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("%s is required", key)
+}
+
 func getEnv(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
 	}
 	return fallback

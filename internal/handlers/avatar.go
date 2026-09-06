@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/practicum/gophprofile/internal/domain"
+	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
 )
@@ -177,7 +178,7 @@ func mapDeleteError(c echo.Context, err error) error {
 }
 
 func internalError(c echo.Context, err error) error {
-	c.Logger().Error(err)
+	observability.LoggerFromContext(c.Request().Context()).Error("internal error", "error", err)
 	return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{
 		Error: http.StatusText(http.StatusInternalServerError),
 	})
