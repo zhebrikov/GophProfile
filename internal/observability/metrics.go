@@ -53,6 +53,16 @@ var (
 		Name: "gophprofile_health_component_up",
 		Help: "Component health (1=up, 0=down)",
 	}, []string{"component"})
+
+	CircuitBreakerState = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "gophprofile_circuit_breaker_state",
+		Help: "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+	}, []string{"name"})
+
+	CircuitBreakerTrips = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gophprofile_circuit_breaker_trips_total",
+		Help: "Total times a circuit breaker transitioned to open",
+	}, []string{"name"})
 )
 
 // MetricsHandler returns the Prometheus scrape handler.
@@ -68,7 +78,7 @@ func EchoMetricsMiddleware() echo.MiddlewareFunc {
 			if path == "" {
 				path = c.Request().URL.Path
 			}
-			if path == "/metrics" || path == "/health" {
+			if path == "/metrics" || path == "/health" || path == "/live" || path == "/ready" {
 				return next(c)
 			}
 

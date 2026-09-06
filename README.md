@@ -7,12 +7,13 @@
 - Загрузка аватарок через REST API и веб-интерфейс
 - Хранение оригиналов и миниатюр в S3-совместимом хранилище (MinIO)
 - Метаданные в PostgreSQL
-- Асинхронная обработка изображений через брокер сообщений (RabbitMQ / Kafka)
+- Асинхронная обработка изображений через RabbitMQ
 - Создание миниатюр 100×100 и 300×300
 - Мягкое удаление с асинхронной очисткой файлов в S3
-- Healthcheck с проверкой БД, S3 и брокера
-- Docker и Docker Compose для локального запуска
-- Observability: OpenTelemetry → Jaeger, Prometheus + Grafana, OpenSearch + Dashboards, Alertmanager
+- Health / live / ready probes, circuit breaker для Postgres / S3 / RabbitMQ
+- Rate limiting, graceful shutdown, non-root контейнеры
+- Docker Compose (local observability) и Helm Chart (Kubernetes)
+- Observability: OpenTelemetry → Jaeger, Prometheus + Grafana, OpenSearch, Alertmanager; в K8s — ServiceMonitor
 
 ## Стек
 
@@ -23,13 +24,15 @@
 | БД | PostgreSQL |
 | Файлы | MinIO (S3) |
 | Очереди | RabbitMQ (topic exchange) |
-| Метрики | Prometheus |
+| Метрики | Prometheus (+ ServiceMonitor в K8s) |
 | Логи | slog (JSON) → Fluent Bit → OpenSearch |
 | Трейсы | OpenTelemetry → Jaeger |
 | Дашборды / алерты | Grafana, OpenSearch Dashboards, Alertmanager |
-| Контейнеры | Docker, Docker Compose |
+| Оркестрация | Docker Compose, Kubernetes, Helm |
 
 ## Архитектура
+
+### Приложение
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
@@ -41,9 +44,7 @@
                            │                    │
                            ▼                    │
                     ┌──────────────┐            │
-                    │ Message Bus  │            │
-                    │ RabbitMQ/    │            │
-                    │ Kafka        │            │
+                    │  RabbitMQ    │            │
                     └──────┬───────┘            │
                            │                    │
                            ▼                    │
@@ -54,13 +55,38 @@
                     └──────────────┘
 ```
 
+### Kubernetes
+
+```
+                    ┌─────────────┐
+                    │   Ingress   │
+                    └──────┬──────┘
+                           │
+              ┌────────────▼────────────┐
+              │  Service (server)       │◀── HPA (CPU/RAM)
+              │  Deployment ×N          │
+              │  /live /ready /metrics  │
+              └────────────┬────────────┘
+        ┌──────────────────┼──────────────────┐
+        ▼                  ▼                  ▼
+   PostgreSQL           MinIO            RabbitMQ
+        ▲                  ▲                  ▲
+        └────────── Worker Deployment ────────┘
+                         ▲
+                    ServiceMonitor
+                         │
+                    Prometheus Operator
+```
+
+Миграции БД: Helm Job (`post-install` / `pre-upgrade`) и initContainer у server/worker (идемпотентный `goose up`, без гонки на первом install). NetworkPolicy ограничивает трафик между компонентами. Секреты — в Secret; non-secret конфиг — в ConfigMap.
+
 ### Компоненты
 
 - **HTTP-сервер** — REST API и веб-интерфейс
 - **Worker** — фоновая обработка изображений и удаление файлов
 - **PostgreSQL** — метаданные аватарок
 - **MinIO** — хранение оригиналов и миниатюр
-- **RabbitMQ / Kafka** — очередь событий обработки
+- **RabbitMQ** — очередь событий обработки
 
 ## Структура проекта
 
@@ -71,15 +97,11 @@ GophProfile/
 │   ├── worker/          # Асинхронная обработка
 │   └── migrate/         # Применение миграций (goose)
 ├── internal/
-│   ├── config/
-│   ├── domain/
-│   ├── handlers/
-│   ├── middleware/
-│   ├── observability/   # логи, метрики, трейсинг
-│   ├── repository/
-│   ├── services/
-│   └── worker/
 ├── pkg/
+│   └── circuitbreaker/  # Circuit breaker (gobreaker)
+├── helm/gophprofile/    # Helm Chart (K8s)
+├── k8s/                 # Ссылка на Helm
+├── docs/openapi.yaml    # OpenAPI 3 спецификация
 ├── monitoring/          # Prometheus, Grafana, OpenSearch, Fluent Bit, Alertmanager
 ├── web/
 ├── migrations/
@@ -104,11 +126,31 @@ GophProfile/
 
 **Трейсинг:** W3C Trace Context; спаны HTTP → service → repository/S3/RabbitMQ → worker. Корреляция через `trace_id` в JSON-логах и в Jaeger.
 
-**Метрики (business):** `gophprofile_avatars_uploaded_total`, `gophprofile_avatars_processed_total`, `gophprofile_avatar_processing_duration_seconds`, `gophprofile_avatars_deleted_total`, HTTP RED.
+**Метрики (business):** `gophprofile_avatars_uploaded_total`, `gophprofile_avatars_processed_total`, `gophprofile_avatar_processing_duration_seconds`, `gophprofile_avatars_deleted_total`, HTTP RED, `gophprofile_circuit_breaker_state`, `gophprofile_circuit_breaker_trips_total`.
 
-**Логи:** структурированный JSON (`slog`) с `request_id`, `trace_id`, `span_id`; Fluent Bit забирает stdout контейнеров `server`/`worker` в OpenSearch (`gophprofile-logs-*`). Поиск: OpenSearch Dashboards (Discover) или Grafana Explore → OpenSearch. При первом заходе в Dashboards создайте index pattern `gophprofile-logs*`, time field `@timestamp`. Примеры фильтров: `service:server`, `trace_id:<id>`, `level:ERROR`.
+**Логи:** структурированный JSON (`slog`) с `request_id`, `trace_id`, `span_id`; Fluent Bit забирает stdout контейнеров `server`/`worker` в OpenSearch (`gophprofile-logs-*`).
 
-**Алерты:** high 5xx rate, high p95 latency, processing failures, health component down. Нотификации уходят в Alertmanager UI и на webhook `:9094`.
+**Алерты:** high 5xx rate, high p95 latency, processing failures, health component down. Правила: [`monitoring/prometheus/alerts.yml`](monitoring/prometheus/alerts.yml) (Compose) и Helm `PrometheusRule` (Kubernetes).
+
+### Kubernetes monitoring
+
+В кластере с **kube-prometheus-stack**:
+
+1. Chart создаёт `ServiceMonitor` для server (`:8080/metrics`) и worker (`:9091/metrics`).
+2. Chart создаёт `PrometheusRule` с теми же алертами, что в Compose.
+3. NetworkPolicy пускает scrape server из namespace `monitoring` (`networkPolicy.metrics`).
+4. **Состояние кластера** (ноды, поды, HPA, deployments) — встроенные дашборды kube-prometheus-stack / Kubernetes / Compute Resources.
+5. **Состояние приложения** — импортируйте [`monitoring/grafana/dashboards/gophprofile-overview.json`](monitoring/grafana/dashboards/gophprofile-overview.json).
+
+Включение:
+```bash
+helm upgrade --install gophprofile ./helm/gophprofile \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true \
+  --set serviceMonitor.labels.release=kube-prometheus-stack \
+  --set prometheusRule.labels.release=kube-prometheus-stack
+```
+(или используйте `values-prod.yaml`, где это уже включено).
 
 ### Проверка алертов (тестовые сценарии)
 
@@ -116,16 +158,16 @@ GophProfile/
    ```bash
    docker compose stop postgres
    curl -s http://localhost:8080/health
-   # через ~1–2 мин: Prometheus → Alerts / Alertmanager → HealthComponentDown
    docker compose start postgres
    ```
-2. **HighHTTPErrorRate** — много запросов к несуществующему ресурсу с ошибками сервера (или временно сломайте S3) до доли 5xx > 5% в течение 2 минут.
-3. **AvatarProcessingFailures** — опубликуйте событие с невалидным `s3_key`, чтобы worker писал `status=failed`; через ~2 мин сработает алерт.
+2. **HighHTTPErrorRate** — доля 5xx > 5% в течение 2 минут.
+3. **AvatarProcessingFailures** — worker пишет `status=failed`; через ~2 мин сработает алерт.
 
-После срабатывания проверьте:
-- http://localhost:9093/#/alerts
-- http://localhost:9094 (тело webhook от Alertmanager)
+После срабатывания: http://localhost:9093/#/alerts и http://localhost:9094.
+
 ## API
+
+OpenAPI 3 спецификация: [`docs/openapi.yaml`](docs/openapi.yaml).
 
 ### Загрузка аватарки
 
@@ -139,19 +181,7 @@ X-User-ID: <user_id>
 |----------|----------|
 | `file` | Бинарный файл (JPEG, PNG, WebP), до 10 MB |
 
-**201 Created**
-
-```json
-{
-  "id": "uuid",
-  "user_id": "string",
-  "url": "string",
-  "status": "processing",
-  "created_at": "2024-01-01T00:00:00Z"
-}
-```
-
-**400** — неверный формат · **413** — файл слишком большой
+**201 Created** · **400** неверный формат · **413** слишком большой
 
 ### Получение аватарки
 
@@ -166,34 +196,10 @@ GET /api/v1/users/{user_id}/avatar
 | `size` | `100x100`, `300x300`, `original` |
 | `format` | `jpeg`, `png`, `webp` |
 
-Ответ: бинарные данные изображения (`Content-Type`, `Cache-Control`, `ETag`).
-
-### Метаданные
+### Метаданные и список
 
 ```http
 GET /api/v1/avatars/{avatar_id}/metadata
-```
-
-```json
-{
-  "id": "uuid",
-  "user_id": "string",
-  "file_name": "avatar.jpg",
-  "mime_type": "image/jpeg",
-  "size": 1024000,
-  "dimensions": { "width": 1920, "height": 1080 },
-  "thumbnails": [
-    { "size": "100x100", "url": "..." },
-    { "size": "300x300", "url": "..." }
-  ],
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
-}
-```
-
-### Список аватарок пользователя
-
-```http
 GET /api/v1/users/{user_id}/avatars
 ```
 
@@ -205,15 +211,15 @@ DELETE /api/v1/users/{user_id}/avatar
 X-User-ID: <user_id>
 ```
 
-Мягкое удаление в БД, асинхронная очистка в S3. **204** при успехе, **403** если аватар чужой.
+Мягкое удаление в БД, асинхронная очистка в S3. **204** / **403**.
 
-### Healthcheck
+### Health / probes
 
 ```http
-GET /health
+GET /live    # liveness — процесс жив
+GET /ready   # readiness — Postgres, S3, broker
+GET /health  # полный статус зависимостей
 ```
-
-JSON со статусами PostgreSQL, S3 и брокера сообщений.
 
 ### Веб-интерфейс
 
@@ -225,129 +231,156 @@ JSON со статусами PostgreSQL, S3 и брокера сообщений
 
 ## Модель данных
 
-```sql
-CREATE TABLE avatars (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id VARCHAR(255) NOT NULL,
-    file_name VARCHAR(255) NOT NULL,
-    mime_type VARCHAR(100) NOT NULL,
-    size_bytes BIGINT NOT NULL,
-    s3_key VARCHAR(500) NOT NULL,
-    thumbnail_s3_keys JSONB,
-    upload_status VARCHAR(50) DEFAULT 'uploading',
-    processing_status VARCHAR(50) DEFAULT 'pending',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    deleted_at TIMESTAMP WITH TIME ZONE
-);
-
-CREATE INDEX idx_avatars_user_id ON avatars(user_id) WHERE deleted_at IS NULL;
-CREATE INDEX idx_avatars_status ON avatars(upload_status, processing_status);
-```
+Таблица `avatars` (UUID, user_id, file metadata, s3_key, thumbnails JSONB, soft-delete) и `processed_messages` для идемпотентности. См. [`migrations/`](migrations/).
 
 ## Асинхронная обработка
 
-После загрузки сервер публикует событие в брокер. Worker:
+После загрузки сервер публикует событие в брокер. Worker загружает оригинал из S3, создаёт миниатюры 100×100 и 300×300, сохраняет в S3 и обновляет статус в БД. Обработка идемпотентна (retry + backoff). Вызовы к Postgres / S3 / RabbitMQ защищены circuit breaker.
 
-1. Загружает оригинал из S3
-2. Создаёт миниатюры 100×100 и 300×300
-3. Сохраняет их в S3
-4. Обновляет статус в БД
-
-### События
-
-```go
-type AvatarUploadEvent struct {
-    AvatarID string `json:"avatar_id"`
-    UserID   string `json:"user_id"`
-    S3Key    string `json:"s3_key"`
-}
-
-type AvatarProcessEvent struct {
-    AvatarID   string         `json:"avatar_id"`
-    Operations []ProcessingOp `json:"operations"`
-}
-
-type AvatarDeleteEvent struct {
-    AvatarID string   `json:"avatar_id"`
-    S3Keys   []string `json:"s3_keys"`
-}
-```
-
-Обработка идемпотентна: уникальные ID сообщений, проверка статуса перед работой, retry с экспоненциальным backoff.
-
-## Быстрый старт
+## Быстрый старт (Docker Compose)
 
 ### Требования
 
 - Go 1.25+
 - Docker и Docker Compose
 
-### Запуск окружения
+### Запуск
 
 ```bash
 docker compose up -d --build
 ```
 
-Поднимаются: **migrate**, **server**, **worker**, PostgreSQL, MinIO, RabbitMQ, **Jaeger**, **Prometheus**, **Alertmanager**, **OpenSearch**, **Fluent Bit**, **Grafana**.
+Поднимаются: migrate, server, worker, PostgreSQL, MinIO, RabbitMQ, Jaeger, Prometheus, Alertmanager, OpenSearch, Fluent Bit, Grafana.
 
 ### Локальная разработка
 
 ```bash
-# Зависимости инфраструктуры
 docker compose up -d postgres minio rabbitmq jaeger
-
-# Миграции (goose; отдельно от server/worker)
 go run ./cmd/migrate -command up
-# или: make migrate
-
-# Сервер и worker (с экспортом трейсов в локальный Jaeger)
 OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 go run ./cmd/server
 OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 go run ./cmd/worker
 ```
-Откат последней миграции: `go run ./cmd/migrate -command down`. Статус: `go run ./cmd/migrate -command status`.
-
-Если PostgreSQL уже поднимался со старой схемой без goose, пересоздайте том: `docker compose down -v`, затем снова `docker compose up -d --build`.
 
 ### Тесты
 
 ```bash
 make test
-make cover   # цель: >50% на internal/ и pkg/
+make cover
 ```
 
-Цель покрытия unit-тестами — **>50%**. Рекомендуемые инструменты: `testify`, `golangci-lint`.
+## Kubernetes / Helm
+
+Chart: [`helm/gophprofile/`](helm/gophprofile/). Включает server, worker, migrate hook, Ingress, HPA, ServiceMonitor, NetworkPolicy, RBAC/SecurityContext и (по умолчанию) Postgres + MinIO + RabbitMQ для локального кластера.
+
+### Требования
+
+- Kubernetes (например Rancher Desktop)
+- Helm 3
+- Ingress NGINX
+- (опционально) kube-prometheus-stack для ServiceMonitor / PrometheusRule
+
+### Локальный деплой (Rancher Desktop)
+
+```bash
+docker build -t gophprofile:local .
+
+kubectl create namespace gophprofile
+
+helm upgrade --install gophprofile ./helm/gophprofile \
+  --namespace gophprofile \
+  --wait
+
+# Если установлен kube-prometheus-stack:
+#   --set serviceMonitor.enabled=true
+
+# /etc/hosts: 127.0.0.1 gophprofile.local
+curl -s http://gophprofile.local/live
+curl -s http://gophprofile.local/ready
+curl -s http://gophprofile.local/health
+```
+
+Port-forward без Ingress:
+
+```bash
+kubectl -n gophprofile port-forward svc/gophprofile-server 8080:8080
+```
+
+### Production values
+
+```bash
+kubectl -n gophprofile create secret generic gophprofile-secrets \
+  --from-literal=DATABASE_URL='postgres://...' \
+  --from-literal=S3_ACCESS_KEY='...' \
+  --from-literal=S3_SECRET_KEY='...' \
+  --from-literal=BROKER_URL='amqp://...'
+
+helm upgrade --install gophprofile ./helm/gophprofile \
+  --namespace gophprofile \
+  -f ./helm/gophprofile/values-prod.yaml \
+  --set image.repository=your.registry/gophprofile \
+  --set image.tag=1.0.0
+```
+
+В `values-prod.yaml`: `infra.enabled=false`, внешние зависимости, более жёсткие resources/HPA.
+
+### Что входит в chart
+
+| Ресурс | Назначение |
+|--------|------------|
+| Deployment server/worker | Приложение, probes, preStop, resource limits, non-root |
+| Service + Ingress | Маршрутизация и load balancing |
+| ConfigMap / Secret | Конфиг и секреты |
+| HPA | Автоскейл по CPU 70% / memory 80% |
+| Job migrate | Helm hook миграций БД (`post-install` / `pre-upgrade`) |
+| initContainer migrate | Гарантирует схему до старта server/worker |
+| ServiceMonitor | Скрейп `/metrics` Prometheus Operator |
+| PrometheusRule | Алерты приложения в кластере |
+| NetworkPolicy | Ограничение ingress/egress (+ scrape из `monitoring`) |
+| ServiceAccount + Role | Минимальные права |
+| Postgres / MinIO / RabbitMQ | Локальная infra (`infra.enabled`); MinIO также через Ingress `/s3` |
+
+Worker probes: `GET :9091/live` (liveness) и `GET :9091/ready` (Postgres / S3 / RabbitMQ).
 
 ## Конфигурация
-
-Основные переменные окружения (пример):
 
 | Переменная | Описание |
 |------------|----------|
 | `HTTP_ADDR` | Адрес HTTP-сервера |
 | `DATABASE_URL` | Строка подключения к PostgreSQL |
 | `S3_ENDPOINT` | Endpoint MinIO / S3 |
-| `S3_ACCESS_KEY` | Access key |
-| `S3_SECRET_KEY` | Secret key |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | Credentials S3 |
 | `S3_BUCKET` | Имя бакета |
-| `BROKER_URL` | URL RabbitMQ / Kafka |
+| `BROKER_URL` | URL RabbitMQ |
 | `OTEL_SERVICE_NAME` | Имя сервиса в трейсах |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint (`host:port`, без схемы) |
-| `METRICS_ADDR` | Адрес `/metrics` у worker (по умолчанию `:9091`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP endpoint (`host:port`) |
+| `METRICS_ADDR` | Адрес `/metrics` у worker |
+| `RATE_LIMIT` | Лимит запросов в секунду на IP |
 
-## Безопасность (бонус)
+## Production-готовность
+
+- Graceful shutdown (SIGINT/SIGTERM + `preStop` в K8s)
+- Circuit breaker для Postgres, S3, RabbitMQ publish
+- Rate limiting (token bucket per IP)
+- Liveness `/live` и readiness `/ready` (server и worker)
+- Resource requests/limits + HPA
+- Secrets для credentials, non-root UID 65532
+- NetworkPolicy между компонентами
+- Ingress TLS (через `ingress.tls` + cert-manager в `values-prod.yaml`)
+- Proper error handling и идемпотентная обработка очереди
+
+## Безопасность
 
 - Валидация MIME-типов и magic bytes
 - Ограничение размера файлов (10 MB)
-- Rate limiting
-- CORS
-- Проверка `X-User-ID` при операциях изменения
+- Rate limiting, CORS, проверка `X-User-ID`
+- Non-root контейнеры, `allowPrivilegeEscalation: false`, drop ALL capabilities
+- RBAC: ServiceAccount без лишних прав на API-сервер
 
 ## Roadmap
 
 **Спринт 1 (MVP):** REST API, PostgreSQL, MinIO, асинхронная обработка, Docker Compose, тесты.  
-**Observability:** Prometheus, Grafana, OpenSearch, Jaeger, Alertmanager — реализовано.
-Последующие спринты — Kubernetes.
+**Observability:** Prometheus, Grafana, OpenSearch, Jaeger, Alertmanager — реализовано.  
+**Kubernetes:** Helm Chart, HPA, ServiceMonitor, PrometheusRule, NetworkPolicy, circuit breaker — реализовано.
 
 ## Лицензия
 

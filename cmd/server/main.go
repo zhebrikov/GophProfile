@@ -20,6 +20,7 @@ import (
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
 	"github.com/practicum/gophprofile/pkg/broker"
+	"github.com/practicum/gophprofile/pkg/circuitbreaker"
 	"github.com/practicum/gophprofile/pkg/storage"
 )
 
@@ -86,9 +87,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	repo := repository.NewAvatarRepository(pool)
-	avatarSvc := services.NewAvatarService(repo, store, mq, cfg.PublicURL, cfg.MaxFileSize)
-	healthSvc := services.NewHealthService(repo, store, mq)
+	repo := circuitbreaker.WrapRepository(
+		repository.NewAvatarRepository(pool),
+		circuitbreaker.New(circuitbreaker.Settings{Name: "postgres"}),
+	)
+	storeCB := circuitbreaker.WrapStorage(store, circuitbreaker.New(circuitbreaker.Settings{Name: "s3"}))
+	mqCB := circuitbreaker.WrapPublisher(mq, circuitbreaker.New(circuitbreaker.Settings{Name: "broker"}))
+
+	avatarSvc := services.NewAvatarService(repo, storeCB, mqCB, cfg.PublicURL, cfg.MaxFileSize)
+	healthSvc := services.NewHealthService(repo, storeCB, mqCB)
 	api := handlers.NewAvatarHandler(avatarSvc, healthSvc)
 
 	web, err := handlers.NewWebHandler(avatarSvc, cfg.WebDir)
@@ -116,6 +123,8 @@ func main() {
 
 	e.GET("/metrics", echo.WrapHandler(observability.MetricsHandler()))
 	e.GET("/health", api.Health)
+	e.GET("/live", api.Live)
+	e.GET("/ready", api.Ready)
 
 	v1 := e.Group("/api/v1")
 	v1.POST("/avatars", api.Upload, appmw.RequireUserID)

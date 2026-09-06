@@ -16,6 +16,7 @@ import (
 	"github.com/practicum/gophprofile/internal/handlers"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
+	"github.com/practicum/gophprofile/pkg/circuitbreaker"
 	"github.com/stretchr/testify/require"
 )
 
@@ -307,4 +308,22 @@ func TestDeleteUserAvatar_Error(t *testing.T) {
 	c.SetParamValues("u1")
 	require.NoError(t, h.DeleteUserAvatar(c))
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestDeleteUserAvatar_CircuitOpen(t *testing.T) {
+	svc := &mockAvatarService{
+		delUserFn: func(ctx context.Context, userID, requesterID string) error {
+			return circuitbreaker.ErrOpen
+		},
+	}
+	h := handlers.NewAvatarHandler(svc, &mockHealth{})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodDelete, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set("user_id", "u1")
+	c.SetParamNames("user_id")
+	c.SetParamValues("u1")
+	require.NoError(t, h.DeleteUserAvatar(c))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }

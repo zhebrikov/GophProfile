@@ -1,0 +1,19 @@
+1. Build and load the image into your cluster (Rancher Desktop example):
+
+   docker build -t {{ .Values.image.repository }}:{{ .Values.image.tag }} .
+   # Rancher Desktop shares the local Docker images with the cluster.
+
+2. Release: {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+
+3. Add to /etc/hosts (if using local Ingress):
+   127.0.0.1 {{ .Values.ingress.host }}
+
+4. Open: http://{{ .Values.ingress.host }}/
+   Health: http://{{ .Values.ingress.host }}/health
+   Metrics: http://{{ .Values.ingress.host }}/metrics
+{{- end }}
+
+5. Port-forward alternatives:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "gophprofile.fullname" . }}-server 8080:{{ .Values.server.port }}

@@ -10,6 +10,7 @@ import (
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
+	"github.com/practicum/gophprofile/pkg/circuitbreaker"
 )
 
 type AvatarHandler struct {
@@ -112,6 +113,21 @@ func (h *AvatarHandler) Health(c echo.Context) error {
 	return c.JSON(code, resp)
 }
 
+// Live is a liveness probe: process is up.
+func (h *AvatarHandler) Live(c echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// Ready is a readiness probe: dependencies are reachable.
+func (h *AvatarHandler) Ready(c echo.Context) error {
+	resp := h.health.Check(c.Request().Context())
+	code := http.StatusOK
+	if resp.Status != "ok" {
+		code = http.StatusServiceUnavailable
+	}
+	return c.JSON(code, resp)
+}
+
 func writeImage(c echo.Context, data []byte, contentType, etag string) error {
 	if match := c.Request().Header.Get("If-None-Match"); match != "" && match == etag {
 		return c.NoContent(http.StatusNotModified)
@@ -178,6 +194,12 @@ func mapDeleteError(c echo.Context, err error) error {
 }
 
 func internalError(c echo.Context, err error) error {
+	if errors.Is(err, circuitbreaker.ErrOpen) {
+		observability.LoggerFromContext(c.Request().Context()).Warn("circuit open", "error", err)
+		return c.JSON(http.StatusServiceUnavailable, domain.ErrorResponse{
+			Error: http.StatusText(http.StatusServiceUnavailable),
+		})
+	}
 	observability.LoggerFromContext(c.Request().Context()).Error("internal error", "error", err)
 	return c.JSON(http.StatusInternalServerError, domain.ErrorResponse{
 		Error: http.StatusText(http.StatusInternalServerError),

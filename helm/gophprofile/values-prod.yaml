@@ -1,0 +1,75 @@
+# Production-oriented overrides. Provide secrets via existingSecret.
+infra:
+  enabled: false
+
+existingSecret: gophprofile-secrets
+
+image:
+  repository: gophprofile
+  tag: "1.0.0"
+  pullPolicy: Always
+
+config:
+  s3Endpoint: "minio.storage.svc.cluster.local:9000"
+  s3UseSSL: "false"
+  s3PublicEndpoint: "https://avatars.example.com"
+  publicURL: "https://gophprofile.example.com"
+  otelEndpoint: "jaeger-collector.observability.svc.cluster.local:4318"
+  rateLimit: "50"
+
+server:
+  replicas: 3
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  hpa:
+    minReplicas: 3
+    maxReplicas: 20
+
+worker:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  hpa:
+    minReplicas: 2
+    maxReplicas: 10
+
+ingress:
+  enabled: true
+  className: nginx
+  host: gophprofile.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "12m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    - secretName: gophprofile-tls
+      hosts:
+        - gophprofile.example.com
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+  labels:
+    release: kube-prometheus-stack
+
+prometheusRule:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+networkPolicy:
+  enabled: true
+  metrics:
+    enabled: true
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: monitoring

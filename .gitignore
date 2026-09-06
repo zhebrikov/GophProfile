@@ -8,3 +8,4 @@ coverage.out
 .vscode/
 tmp/
 vendor/
+.bin/
