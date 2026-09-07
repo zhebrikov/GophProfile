@@ -2,10 +2,13 @@ package services
 
 import (
 	"context"
+	"time"
 
 	"github.com/practicum/gophprofile/internal/domain"
 	"github.com/practicum/gophprofile/internal/observability"
 )
+
+const healthCheckTimeout = 2 * time.Second
 
 type HealthService struct {
 	repo    AvatarRepository
@@ -18,6 +21,9 @@ func NewHealthService(repo AvatarRepository, store ObjectStorage, mq EventPublis
 }
 
 func (s *HealthService) Check(ctx context.Context) domain.HealthResponse {
+	ctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	defer cancel()
+
 	components := map[string]string{
 		"postgres": "ok",
 		"s3":       "ok",

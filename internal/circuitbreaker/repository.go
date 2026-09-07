@@ -6,8 +6,8 @@ import (
 	"github.com/practicum/gophprofile/internal/domain"
 )
 
-// Repository covers avatar persistence used by server and worker.
-type Repository interface {
+// avatarRepo is the avatar persistence surface wrapped by the breaker.
+type avatarRepo interface {
 	Create(ctx context.Context, avatar *domain.Avatar) error
 	GetByID(ctx context.Context, id string) (*domain.Avatar, error)
 	GetByIDIncludingDeleted(ctx context.Context, id string) (*domain.Avatar, error)
@@ -24,12 +24,12 @@ type Repository interface {
 
 // RepositoryBreaker wraps repository calls with a circuit breaker.
 type RepositoryBreaker struct {
-	inner Repository
+	inner avatarRepo
 	cb    *Breaker
 }
 
 // WrapRepository returns a repository wrapper protected by breaker name "postgres".
-func WrapRepository(inner Repository, cb *Breaker) *RepositoryBreaker {
+func WrapRepository(inner avatarRepo, cb *Breaker) *RepositoryBreaker {
 	if cb == nil {
 		cb = New(Settings{Name: "postgres"})
 	}

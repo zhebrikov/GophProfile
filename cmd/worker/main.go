@@ -12,20 +12,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 	"github.com/practicum/gophprofile/internal/config"
+	"github.com/practicum/gophprofile/internal/domain"
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
+	"github.com/practicum/gophprofile/internal/services"
 	"github.com/practicum/gophprofile/internal/worker"
 	"github.com/practicum/gophprofile/pkg/broker"
-	"github.com/practicum/gophprofile/pkg/circuitbreaker"
 	"github.com/practicum/gophprofile/pkg/storage"
 )
-
-type workerDeps struct {
-	repo  circuitbreaker.Repository
-	store circuitbreaker.Storage
-	mq    interface{ Ping(context.Context) error }
-}
 
 func main() {
 	cfg, err := config.Load()
@@ -55,8 +51,8 @@ func main() {
 	}()
 
 	var (
-		ready atomic.Bool
-		deps  atomic.Pointer[workerDeps]
+		ready  atomic.Bool
+		health atomic.Pointer[services.HealthService]
 	)
 
 	metricsAddr := cfg.MetricsAddr
@@ -65,7 +61,7 @@ func main() {
 	}
 	metricsSrv := &http.Server{
 		Addr:              metricsAddr,
-		Handler:           newWorkerProbeHandler(&ready, &deps),
+		Handler:           newWorkerProbeHandler(&ready, &health),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -112,7 +108,7 @@ func main() {
 		circuitbreaker.New(circuitbreaker.Settings{Name: "postgres"}),
 	)
 	storeCB := circuitbreaker.WrapStorage(s3Store, circuitbreaker.New(circuitbreaker.Settings{Name: "s3"}))
-	deps.Store(&workerDeps{repo: repo, store: storeCB, mq: mq})
+	health.Store(services.NewHealthService(repo, storeCB, mq))
 	ready.Store(true)
 
 	w := worker.New(repo, storeCB, mq)
@@ -129,18 +125,18 @@ func main() {
 	}
 }
 
-func newWorkerProbeHandler(ready *atomic.Bool, deps *atomic.Pointer[workerDeps]) http.Handler {
+func newWorkerProbeHandler(ready *atomic.Bool, health *atomic.Pointer[services.HealthService]) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", observability.MetricsHandler())
 	mux.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		if !ready.Load() || d == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"status": "starting",
-				"components": map[string]string{
+		hs := health.Load()
+		if !ready.Load() || hs == nil {
+			writeJSON(w, http.StatusServiceUnavailable, domain.HealthResponse{
+				Status: "starting",
+				Components: map[string]string{
 					"postgres": "starting",
 					"s3":       "starting",
 					"broker":   "starting",
@@ -149,35 +145,12 @@ func newWorkerProbeHandler(ready *atomic.Bool, deps *atomic.Pointer[workerDeps])
 			return
 		}
 
-		ctx := r.Context()
-		components := map[string]string{
-			"postgres": "ok",
-			"s3":       "ok",
-			"broker":   "ok",
-		}
-		status := "ok"
+		resp := hs.Check(r.Context())
 		code := http.StatusOK
-
-		if err := d.repo.Ping(ctx); err != nil {
-			components["postgres"] = "unavailable"
-			status = "degraded"
+		if resp.Status != "ok" {
 			code = http.StatusServiceUnavailable
 		}
-		if err := d.store.Ping(ctx); err != nil {
-			components["s3"] = "unavailable"
-			status = "degraded"
-			code = http.StatusServiceUnavailable
-		}
-		if err := d.mq.Ping(ctx); err != nil {
-			components["broker"] = "unavailable"
-			status = "degraded"
-			code = http.StatusServiceUnavailable
-		}
-
-		writeJSON(w, code, map[string]any{
-			"status":     status,
-			"components": components,
-		})
+		writeJSON(w, code, resp)
 	})
 	return mux
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
-	"github.com/practicum/gophprofile/pkg/circuitbreaker"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 )
 
 type AvatarHandler struct {

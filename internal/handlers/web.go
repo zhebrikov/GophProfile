@@ -9,7 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/services"
-	"github.com/practicum/gophprofile/pkg/circuitbreaker"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 )
 
 type WebHandler struct {

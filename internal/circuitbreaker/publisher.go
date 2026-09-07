@@ -4,20 +4,20 @@ import (
 	"context"
 )
 
-// Publisher is the message publish interface protected by the breaker.
-type Publisher interface {
+// eventPublisher is the message publish surface wrapped by the breaker.
+type eventPublisher interface {
 	Publish(ctx context.Context, routingKey string, payload any) error
 	Ping(ctx context.Context) error
 }
 
 // PublisherBreaker wraps Publish/Ping with a circuit breaker.
 type PublisherBreaker struct {
-	inner Publisher
+	inner eventPublisher
 	cb    *Breaker
 }
 
 // WrapPublisher returns a publisher wrapper protected by breaker name "broker".
-func WrapPublisher(inner Publisher, cb *Breaker) *PublisherBreaker {
+func WrapPublisher(inner eventPublisher, cb *Breaker) *PublisherBreaker {
 	if cb == nil {
 		cb = New(Settings{Name: "broker"})
 	}

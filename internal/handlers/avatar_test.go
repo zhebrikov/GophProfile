@@ -16,7 +16,7 @@ import (
 	"github.com/practicum/gophprofile/internal/handlers"
 	"github.com/practicum/gophprofile/internal/repository"
 	"github.com/practicum/gophprofile/internal/services"
-	"github.com/practicum/gophprofile/pkg/circuitbreaker"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 	"github.com/stretchr/testify/require"
 )
 

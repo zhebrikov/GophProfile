@@ -97,8 +97,8 @@ GophProfile/
 │   ├── worker/          # Асинхронная обработка
 │   └── migrate/         # Применение миграций (goose)
 ├── internal/
-├── pkg/
 │   └── circuitbreaker/  # Circuit breaker (gobreaker)
+├── pkg/                 # broker, storage, imageutil
 ├── helm/gophprofile/    # Helm Chart (K8s)
 ├── k8s/                 # Ссылка на Helm
 ├── docs/openapi.yaml    # OpenAPI 3 спецификация
