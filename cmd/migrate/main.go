@@ -6,10 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/practicum/gophprofile/internal/config"
 	"github.com/pressly/goose/v3"
 )
 
@@ -20,12 +20,12 @@ func main() {
 	)
 	flag.Parse()
 
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("config: %v", err)
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is required")
 	}
 
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("postgres: %v", err)
 	}

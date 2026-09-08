@@ -1,0 +1,54 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "gophprofile.fullname" . }}
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: gophprofile
+      rules:
+        - alert: HighHTTPErrorRate
+          expr: |
+            sum(rate(gophprofile_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(gophprofile_http_requests_total[5m])), 0.001)
+            > 0.05
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: High HTTP 5xx error rate
+            description: More than 5% of HTTP requests are failing with 5xx.
+        - alert: HighRequestLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(gophprofile_http_request_duration_seconds_bucket[5m])) by (le))
+            > 2
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: High HTTP p95 latency
+            description: p95 request latency is above 2 seconds.
+        - alert: AvatarProcessingFailures
+          expr: |
+            sum(rate(gophprofile_avatars_processed_total{status="failed"}[5m])) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Avatar processing failures detected
+            description: Worker is reporting failed avatar processing.
+        - alert: HealthComponentDown
+          expr: gophprofile_health_component_up == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Health component down
+            description: Component {{`{{ $labels.component }}`}} is unavailable.
+{{- end }}

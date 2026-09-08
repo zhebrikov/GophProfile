@@ -2,17 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 	"github.com/practicum/gophprofile/internal/config"
+	"github.com/practicum/gophprofile/internal/domain"
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/repository"
+	"github.com/practicum/gophprofile/internal/services"
 	"github.com/practicum/gophprofile/internal/worker"
 	"github.com/practicum/gophprofile/pkg/broker"
 	"github.com/practicum/gophprofile/pkg/storage"
@@ -45,6 +50,27 @@ func main() {
 		_ = shutdownTracing(shutdownCtx)
 	}()
 
+	var (
+		ready  atomic.Bool
+		health atomic.Pointer[services.HealthService]
+	)
+
+	metricsAddr := cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           newWorkerProbeHandler(&ready, &health),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		slog.Info("worker probes/metrics listening", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("metrics server", "error", err)
+		}
+	}()
+
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("postgres", "error", err)
@@ -57,7 +83,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	store, err := storage.NewS3Storage(
+	s3Store, err := storage.NewS3Storage(
 		cfg.S3.Endpoint, cfg.S3.AccessKey, cfg.S3.SecretKey,
 		cfg.S3.Bucket, cfg.S3.UseSSL, cfg.S3.PublicEndpoint,
 	)
@@ -65,7 +91,7 @@ func main() {
 		slog.Error("s3", "error", err)
 		os.Exit(1)
 	}
-	if err := waitFor(ctx, "s3", func() error { return store.EnsureBucket(ctx) }); err != nil {
+	if err := waitFor(ctx, "s3", func() error { return s3Store.EnsureBucket(ctx) }); err != nil {
 		slog.Error("s3", "error", err)
 		os.Exit(1)
 	}
@@ -77,24 +103,15 @@ func main() {
 	}
 	defer func() { _ = mq.Close() }()
 
-	repo := repository.NewAvatarRepository(pool)
-	w := worker.New(repo, store, mq)
+	repo := circuitbreaker.WrapRepository(
+		repository.NewAvatarRepository(pool),
+		circuitbreaker.New(circuitbreaker.Settings{Name: "postgres"}),
+	)
+	storeCB := circuitbreaker.WrapStorage(s3Store, circuitbreaker.New(circuitbreaker.Settings{Name: "s3"}))
+	health.Store(services.NewHealthService(repo, storeCB, mq))
+	ready.Store(true)
 
-	metricsAddr := cfg.MetricsAddr
-	if metricsAddr == "" {
-		metricsAddr = ":9091"
-	}
-	metricsSrv := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           observability.MetricsHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		slog.Info("worker metrics listening", "addr", metricsAddr)
-		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("metrics server", "error", err)
-		}
-	}()
+	w := worker.New(repo, storeCB, mq)
 
 	slog.Info("worker starting")
 	err = w.Start(ctx)
@@ -106,6 +123,42 @@ func main() {
 		slog.Error("worker", "error", err)
 		os.Exit(1)
 	}
+}
+
+func newWorkerProbeHandler(ready *atomic.Bool, health *atomic.Pointer[services.HealthService]) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", observability.MetricsHandler())
+	mux.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		hs := health.Load()
+		if !ready.Load() || hs == nil {
+			writeJSON(w, http.StatusServiceUnavailable, domain.HealthResponse{
+				Status: "starting",
+				Components: map[string]string{
+					"postgres": "starting",
+					"s3":       "starting",
+					"broker":   "starting",
+				},
+			})
+			return
+		}
+
+		resp := hs.Check(r.Context())
+		code := http.StatusOK
+		if resp.Status != "ok" {
+			code = http.StatusServiceUnavailable
+		}
+		writeJSON(w, code, resp)
+	})
+	return mux
+}
+
+func writeJSON(w http.ResponseWriter, code int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func waitFor(ctx context.Context, name string, fn func() error) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/practicum/gophprofile/internal/observability"
 	"github.com/practicum/gophprofile/internal/services"
+	"github.com/practicum/gophprofile/internal/circuitbreaker"
 )
 
 type WebHandler struct {
@@ -80,6 +81,13 @@ func (h *WebHandler) mapWebUploadError(c echo.Context, err error) error {
 		return h.renderUploadError(c, "Invalid file format")
 	case errors.Is(err, services.ErrInvalidUserID):
 		return h.renderUploadError(c, "Invalid user ID")
+	case errors.Is(err, circuitbreaker.ErrOpen):
+		observability.LoggerFromContext(c.Request().Context()).Warn("web upload circuit open", "error", err)
+		c.Response().WriteHeader(http.StatusServiceUnavailable)
+		return h.tmpl.ExecuteTemplate(c.Response(), "upload.html", map[string]any{
+			"Title": "Upload Avatar",
+			"Error": http.StatusText(http.StatusServiceUnavailable),
+		})
 	default:
 		observability.LoggerFromContext(c.Request().Context()).Error("web upload failed", "error", err)
 		c.Response().WriteHeader(http.StatusInternalServerError)
